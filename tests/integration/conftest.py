@@ -36,6 +36,9 @@ async def clean_tables(db_pool: asyncpg.Pool):
                 IF EXISTS (SELECT FROM pg_tables WHERE tablename = 'semantic_memories') THEN
                     TRUNCATE TABLE semantic_memories;
                 END IF;
+                IF EXISTS (SELECT FROM pg_tables WHERE tablename = 'chunks') THEN
+                    TRUNCATE TABLE chunks;
+                END IF;
             END $$;
             """
         )
