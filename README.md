@@ -1,30 +1,39 @@
 # AthenaAI — Modular AI Runtime
 
-> A production-grade Python runtime for building reliable, observable, tool-using
-> AI applications — autonomous agents, RAG pipeline, intelligent model routing,
-> token-budgeted context management, persistent memory, typed tool execution,
-> structured logging, and Prometheus metrics. Ships as a FastAPI service with
-> a single `docker compose up`.
+> The infrastructure layer that sits under an AI product — model routing, autonomous agents, RAG pipeline, resilience, observability, and a production API. Built from scratch instead of wrapping LangChain to understand every layer.
+
+**`docker compose up`** starts the full stack. No API key required to demo.
 
 ---
 
-## Quick Demo
+## What this is
+
+Most AI projects call an LLM API and call it done. AthenaAI is the layer *underneath* that — the platform an AI engineering team builds internally so product teams can ship AI features without re-solving routing, retries, context management, tool security, and observability every time.
+
+Companies like Stripe, Shopify, and every serious AI team have something like this internally. They don't use LangChain in production — too opaque, too hard to debug, not built for their reliability requirements. They build their own. This is that thing.
+
+```
+Product team calls:  POST /v1/chat  or  POST /v1/agents/run
+                              ↓
+AthenaAI handles:    routing → context → model → tools → memory → observability
+```
+
+---
+
+## Quick demo
 
 ```bash
-# Clone and start (no API key needed — runs in mock mode)
-git clone https://github.com/shreyshringare/AthenaAI.git
-cd AthenaAI
+git clone https://github.com/shreyshringare/AthenaAI && cd AthenaAI
 docker compose up --build -d
+```
 
-# Health check
-curl http://localhost:8000/health
-
+```bash
 # Chat
 curl -X POST http://localhost:8000/v1/chat \
   -H "Content-Type: application/json" \
   -d '{"messages":[{"role":"user","content":"What is the capital of France?"}]}'
 
-# Autonomous agent with calculator tool
+# Autonomous agent with tool use — shows the full agentic loop
 curl -X POST http://localhost:8000/v1/agents/run \
   -H "Content-Type: application/json" \
   -d '{"task":"Calculate compound interest on $1000 at 5% for 3 years","tools":["calculator"]}'
@@ -32,26 +41,19 @@ curl -X POST http://localhost:8000/v1/agents/run \
 # Streaming (Server-Sent Events)
 curl -N -X POST http://localhost:8000/v1/chat/stream \
   -H "Content-Type: application/json" \
-  -d '{"messages":[{"role":"user","content":"Tell me a joke"}]}'
+  -d '{"messages":[{"role":"user","content":"Explain asyncio in one sentence"}]}'
 
 # Prometheus metrics
 curl http://localhost:8000/metrics
 
-# Grafana dashboards → http://localhost:3000  (admin / athena)
+# Interactive API docs
+open http://localhost:8000/docs
 ```
 
-Enable real Claude AI by setting your API key:
+**Runs in mock mode by default** (no API key, deterministic output, full pipeline active). Enable real Claude:
 
 ```bash
-ANTHROPIC_API_KEY=sk-ant-... docker compose up --build -d
-```
-
-Or run locally without Docker:
-
-```bash
-uv pip install -e ".[dev]"
-make dev     # starts uvicorn on :8000
-make demo    # runs the full demo sequence
+ANTHROPIC_API_KEY=sk-ant-... docker compose up -d
 ```
 
 ---
@@ -63,257 +65,195 @@ HTTP Request
      │
      ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│                        FastAPI Gateway (P9)                     │
-│  /v1/chat  /v1/chat/stream  /v1/agents/run  /health  /metrics  │
-└───────────────────┬────────────────────────┬────────────────────┘
-                    │                        │
-          ┌─────────▼──────────┐   ┌────────▼───────────┐
-          │  AthenaRuntime (P9)│   │    Agent (P8)       │
-          │  semaphore-bounded │   │  state machine      │
-          │  model call        │   │  tool loop          │
-          └─────────┬──────────┘   └────────┬────────────┘
-                    │                        │
-          ┌─────────▼──────────────────────▼──────────────┐
-          │               Model Router (P3)                │
-          │   policy scoring → circuit-aware selection     │
-          └──────┬──────────────────────────┬─────────────┘
-                 │                          │
-        ┌────────▼──────┐         ┌────────▼──────────┐
-        │  MockModel    │         │   CloudModel       │
-        │  (no API key) │         │   (Anthropic)      │
-        └───────────────┘         └───────────────────-┘
-                 │
-     ┌───────────┼───────────────────────┐
-     │           │                       │
-┌────▼────┐ ┌───▼──────────┐   ┌────────▼───────┐
-│ Context │ │ Memory (P5)  │   │  RAG (P6)       │
-│ Engine  │ │ conversation │   │  parser→chunker │
-│  (P4)   │ │ semantic     │   │  →embedder      │
-│  token  │ │ pgvector     │   │  →pgvector      │
-│  budget │ │ summary      │   │  →reranker      │
-└─────────┘ └──────────────┘   └────────────────┘
-                 │
-         ┌───────▼────────┐
-         │ Tool System(P7)│
-         │ calculator     │
-         │ http (SSRF-    │
-         │  protected)    │
-         │ sql (readonly) │
-         └────────────────┘
-                 │
-     ┌───────────▼───────────┐
-     │   Observability (P10) │
-     │  structlog + Prometheus│
-     └───────────────────────┘
+│                     FastAPI Gateway (P9)                        │
+│  POST /v1/chat  ·  POST /v1/chat/stream  ·  POST /v1/agents/run│
+│  POST /v1/documents/ingest  ·  GET /health  ·  GET /metrics    │
+└────────────────────┬──────────────────────┬─────────────────────┘
+                     │                      │
+           ┌─────────▼────────┐   ┌─────────▼─────────┐
+           │  AthenaRuntime   │   │   AgentExecutor    │
+           │  semaphore-bound │   │   state machine    │
+           │  model call      │   │   parallel tools   │
+           └─────────┬────────┘   └─────────┬──────────┘
+                     │                      │
+           ┌─────────▼──────────────────────▼──────────┐
+           │              Model Router (P3)             │
+           │  quality/cost/latency scoring              │
+           │  circuit-aware selection · complexity cls  │
+           └──────┬────────────────────────────────────-┘
+                  │
+       ┌──────────▼──────────┐
+       │     Model Layer     │
+       │  Mock · Cloud · Local│
+       └──────────┬──────────┘
+                  │
+    ┌─────────────┼──────────────────────────┐
+    │             │                          │
+┌───▼────┐  ┌─────▼──────────┐  ┌───────────▼──────┐
+│Context │  │  Memory (P5)   │  │   RAG (P6)        │
+│Engine  │  │  conversation  │  │   parser→chunker  │
+│(P4)    │  │  summary       │  │   →embedder       │
+│token   │  │  semantic      │  │   →pgvector       │
+│budget  │  │  pgvector      │  │   →reranker       │
+└────────┘  └────────────────┘  └──────────────────┘
+                  │
+          ┌───────▼────────┐
+          │  Tools (P7)    │
+          │  calculator    │
+          │  http (SSRF)   │
+          │  sql (readonly)│
+          └───────┬────────┘
+                  │
+          ┌───────▼────────────────┐
+          │   Observability (P10)  │
+          │   structlog · Prometheus│
+          └────────────────────────┘
 ```
 
 ---
 
-## Phase Status
+## Why this is hard to build
 
-| Phase | Scope | Status | Tests |
-|-------|-------|--------|-------|
-| P0 | Core types, protocols, config, lifecycle | ✅ Complete | 15 |
-| P1 | Model layer (Mock, Cloud, Local, Registry) | ✅ Complete | 9 |
-| P2 | Resilience (retry, timeout, circuit breaker, rate limiter) | ✅ Complete | 10 |
-| P3 | Model router (scoring, policies, complexity routing) | ✅ Complete | 8 |
-| P4 | Context engine + token budget manager | ✅ Complete | 8 |
-| P5 | Memory layer (conversation, summary, semantic, working) | ✅ Complete | 11 |
-| P6 | RAG pipeline (parser, chunker, embedder, retriever, reranker) | ✅ Complete | 16 |
-| P7 | Tool system (validator, calculator, SQL, HTTP, registry) | ✅ Complete | 33 |
-| P8 | Agent runtime (state machine, executor, parallel tools) | ✅ Complete | 13 |
-| P9 | FastAPI gateway + streaming SSE + full pipeline | ✅ Complete | 9 |
-| P10 | Observability (structlog, Prometheus metrics) | ✅ Complete | — |
-| P14 | Docker Compose + Makefile + Prometheus + Grafana | ✅ Complete | — |
+Six engineering decisions that aren't obvious until you've hit the problem:
 
-**Total: 112 unit tests passing.**
+| Problem | Decision | Why |
+|---------|----------|-----|
+| Calculator security | AST walk, never `eval()` | `eval()` executes arbitrary Python — one user input becomes code execution |
+| Interface coupling | `Protocol` over `ABC` | Structural subtyping — `MockModel` satisfies `Model` without inheriting it, enabling test doubles with zero boilerplate |
+| Context retrieval latency | `asyncio.gather(memory, rag)` | Memory and retrieval are independent — run them in parallel, pay the cost of the slower one instead of both |
+| Model flakiness | Circuit breaker (CLOSED→OPEN→HALF_OPEN) | Open circuits are skipped at routing time, not mid-call — fail fast before the model is contacted |
+| Pipeline correctness | Frozen dataclasses end-to-end | `AIRequest`, `AIResponse`, `TraceSpan` can't be mutated mid-pipeline, safe to cache, safe across async boundaries |
+| SQL injection + privilege | String check + `readonly=True` transaction | String-level checks can be bypassed by obfuscation. DB-level readonly enforcement is the second, unbypassable layer |
 
 ---
 
-## What's Implemented
+## Phase status
 
-### P0 — Core types
-Frozen dataclasses for `Message`, `AIRequest`, `AIResponse`, `TokenUsage`,
-`TraceSpan`, `RoutingContext`. Structural `Protocol` interfaces for `Model`,
-`Tool`, `MemoryStore`, `Retriever`, `CacheBackend`, `EmbedderProtocol`.
-`AthenaConfig` via `pydantic-settings` with env-var override.
+| Phase | Scope | Tests |
+|-------|-------|-------|
+| P0 | Core types, protocols, config, lifecycle | 15 |
+| P1 | Model layer — Mock, Cloud (Anthropic), Local (Ollama), Registry | 9 |
+| P2 | Resilience — exponential-backoff retry, timeout, circuit breaker, rate limiter | 10 |
+| P3 | Model router — quality/cost/latency scoring, complexity classification | 8 |
+| P4 | Context engine — token budget per bucket, priority packing, parallel retrieval | 8 |
+| P5 | Memory — conversation (asyncpg), summary (auto-compress), semantic (pgvector), working | 11 |
+| P6 | RAG — parser, sliding-window chunker, batch embedder, pgvector retriever, reranker | 16 |
+| P7 | Tool system — validator, calculator (AST), SQL (readonly), HTTP (SSRF-safe), registry | 33 |
+| P8 | Agent runtime — state machine, executor, parallel tool dispatch, max-iteration cap | 13 |
+| P9 | FastAPI gateway — chat, SSE streaming, agents, document ingest, health, metrics | 9 |
+| P10 | Observability — structlog structured logging, Prometheus metrics | — |
+| P14 | Docker Compose — api + postgres/pgvector + Prometheus + Grafana + Makefile | — |
 
-### P1 — Model layer
-- `MockModel` — deterministic echo, zero API keys, streaming support
-- `CloudModel` — async httpx, retries, 429 → `RateLimitError`, 5xx → `ModelUnavailableError`
-- `LocalModel` — Ollama `/api/generate`
-- `ModelRegistry` — config-driven, O(1) role lookup, health check
-
-### P2 — Resilience
-- `RetryPolicy` — exponential backoff + full jitter
-- `CircuitBreaker` — CLOSED/OPEN/HALF_OPEN, `asyncio.Lock` for CAS transitions
-- `TokenBucketRateLimiter` — per-user token buckets
-- `with_timeout` — asyncio task timeout wrapper
-
-### P3 — Model router
-Weighted quality/cost/latency scoring. Complexity classification (LOW/MEDIUM/HIGH).
-Open circuits skipped automatically. Returns frozen `RoutingDecision`.
-
-### P4 — Context engine
-`TokenBudgetManager` with hard ceilings per bucket (system/conversation/memory/rag/tools).
-Raises `ContextOverflowError` — never silent truncation. `ContextEngine.build()` calls
-memory and retriever in parallel via `asyncio.gather`.
-
-### P5 — Memory layer
-- `ConversationMemory` — asyncpg-backed message store
-- `SummaryMemory` — compresses when > 20 raw messages
-- `SemanticMemory` — pgvector cosine search (`<=>` operator)
-- `WorkingMemory` — in-process dict for scratchpad state
-
-### P6 — RAG pipeline
-`DocumentParser` → `SlidingWindowChunker` (token-aware, sliding overlap) →
-`CloudEmbedder` (batch-aware, OpenAI-compatible) → `PgVectorRetriever`
-(pgvector `<=>` cosine search) → `CosineReranker`. `DocumentLoader.ingest()`
-is idempotent on `document_id`.
-
-### P7 — Tool system
-- `ToolValidator` — JSON Schema validation first, permission check second
-- `CalculatorTool` — AST walk only, never `eval()`
-- `SQLTool` — read-only asyncpg transaction, rejects non-SELECT at string + DB level
-- `HTTPTool` — domain allowlist with subdomain support, SSRF protection
-- `ToolRegistry` — O(1) name lookup, schema export for model system prompt
-
-### P8 — Agent runtime
-`AgentStatus` state machine with legal-transition validation. `AgentExecutor`
-runs the model-tool loop with hard `max_iterations` cap. Parallel tool execution
-via `asyncio.gather`. Text-protocol tool call parsing (`TOOL_CALL: {json}`).
-Structured tool call metadata path for real Anthropic API responses.
-
-### P9 — FastAPI gateway
-- `POST /v1/chat` — single-turn chat with usage stats
-- `POST /v1/chat/stream` — Server-Sent Events streaming
-- `POST /v1/agents/run` — autonomous multi-step agent
-- `POST /v1/documents/ingest` — RAG document ingestion
-- `GET /health` — liveness probe
-- `GET /ready` — readiness probe (model health check)
-- `GET /metrics` — Prometheus text format
-- `GET /docs` — interactive Swagger UI
-
-### P10 — Observability
-`structlog` with ISO timestamps, bound context, JSON/console renderer switch
-via `LOG_FORMAT=json`. Prometheus counters and histograms:
-`athena_requests_total`, `athena_model_latency_seconds`,
-`athena_tokens_total`, `athena_tool_calls_total`,
-`athena_agent_iterations_total`, `athena_rag_chunks_retrieved_total`.
-
-### P14 — Docker
-Multi-stage `Dockerfile` (builder → runtime, non-root user, healthcheck).
-`docker-compose.yml` with `api + postgres(pgvector) + prometheus + grafana`.
-`migrations/init.sql` creates all tables and vector indexes on first start.
-`Makefile` with `install / lint / type / test / up / down / demo` targets.
+**Total: 112 unit tests. All passing.**
 
 ---
 
-## Dev Setup
+## What you can build on top
+
+| Use case | How |
+|----------|-----|
+| Document Q&A chatbot | Ingest PDFs via `/v1/documents/ingest`, query via `/v1/chat` |
+| Autonomous data analyst | POST task to `/v1/agents/run` with SQL tool pointing at read-only DB |
+| Internal knowledge base | RAG over company docs, semantic search over pgvector |
+| Multi-model A/B testing | Register two models in ModelRegistry, score via router policies |
+| Compliance-safe AI | SQLTool enforces readonly, HTTPTool enforces domain allowlist, all queries logged |
+
+---
+
+## Dev setup
 
 ```bash
-# Install (requires Python 3.12+, uv)
+# Install
 uv pip install -e ".[dev]"
 
-# Lint + type check
+# Run locally (no Docker)
+make dev           # uvicorn on :8000
+
+# Test
+make test-unit     # 112 unit tests, no DB needed
+make test          # full suite including integration
+
+# Lint + types
 make lint
 make type
 
-# Unit tests (no database needed)
-make test-unit
-
-# Integration tests (requires postgres on port 5433)
-make test-integration
-
-# Run API locally
-make dev
-
-# Full demo sequence
-make demo
+# Full stack
+make up            # docker compose up --build -d
+make demo          # runs curl smoke test sequence
+make down
 ```
 
 ---
 
-## API Reference
+## API reference
 
-### `POST /v1/chat`
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/v1/chat` | Single-turn chat. Returns `content`, `model`, `trace_id`, `usage`. |
+| `POST` | `/v1/chat/stream` | Same as `/v1/chat` but Server-Sent Events — tokens stream as they arrive. |
+| `POST` | `/v1/agents/run` | Autonomous agent. Returns `final_answer`, `steps[]`, `tool_calls[]`, `status`. |
+| `POST` | `/v1/documents/ingest` | RAG ingest. Idempotent on `document_id`. Returns `chunks_stored`. |
+| `GET`  | `/health` | Liveness probe. Always 200 if process is up. |
+| `GET`  | `/ready` | Readiness probe. Checks model health. |
+| `GET`  | `/metrics` | Prometheus text format. |
+| `GET`  | `/docs` | Interactive Swagger UI. |
 
-```json
-{
-  "messages": [{"role": "user", "content": "What is 2+2?"}],
-  "model": "default",
-  "user_id": "alice",
-  "session_id": "session-1"
-}
-```
-
-Response:
-
-```json
-{
-  "content": "4",
-  "model": "mock",
-  "trace_id": "...",
-  "request_id": "...",
-  "usage": {"input_tokens": 5, "output_tokens": 1, "total_tokens": 6}
-}
-```
-
-### `POST /v1/agents/run`
+### `/v1/agents/run` response shape
 
 ```json
 {
-  "task": "Calculate the area of a circle with radius 7",
-  "tools": ["calculator"],
-  "max_iterations": 10
+  "status": "completed",
+  "total_iterations": 2,
+  "final_answer": "After 3 years: $1,157.63",
+  "steps": [
+    {
+      "iteration": 0,
+      "model_response": "TOOL_CALL: {\"name\": \"calculator\", \"arguments\": {\"expression\": \"1000*1.05**3\"}}",
+      "tool_calls": [{"name": "calculator", "arguments": {"expression": "1000*1.05**3"}}],
+      "tool_results": [{"name": "calculator", "result": 1157.625}]
+    },
+    {
+      "iteration": 1,
+      "model_response": "After 3 years: $1,157.63",
+      "tool_calls": [],
+      "tool_results": []
+    }
+  ]
 }
-```
-
-Response includes `final_answer`, `steps[]` (each with `model_response`,
-`tool_calls`, `tool_results`), `total_iterations`, `status`.
-
-### `POST /v1/chat/stream`
-
-Same request body as `/v1/chat`. Response is Server-Sent Events:
-
-```
-data: Hello
-data:  there
-data: !
-data: [DONE]
 ```
 
 ---
 
-## Tech Stack
+## Environment variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ANTHROPIC_API_KEY` | — | Enable real Claude AI calls. Without it: mock mode. |
+| `ANTHROPIC_MODEL` | `claude-3-5-haiku-20241022` | Model ID |
+| `ATHENA_DB_URL` | — | PostgreSQL DSN for memory + RAG |
+| `ATHENA_EMBEDDER_URL` | — | Embeddings API base URL |
+| `ATHENA_ALLOWED_DOMAINS` | — | Comma-separated domains HTTPTool can reach |
+| `ATHENA_MAX_CONCURRENT` | `20` | Semaphore cap on concurrent model calls |
+| `ATHENA_MAX_AGENT_ITER` | `10` | Hard cap on agent loop iterations |
+| `LOG_LEVEL` | `INFO` | |
+| `LOG_FORMAT` | — | Set to `json` for production log aggregators |
+
+---
+
+## Tech stack
 
 | Layer | Technology |
 |-------|-----------|
 | HTTP framework | FastAPI + uvicorn |
-| Async runtime | asyncio (no threads) |
-| Database | PostgreSQL + pgvector |
+| Async runtime | asyncio (no threads anywhere) |
+| Database | PostgreSQL 16 + pgvector |
 | Async DB driver | asyncpg |
 | HTTP client | httpx (async) |
-| Config | pydantic-settings |
-| Logging | structlog |
+| Config | pydantic-settings (env-driven) |
+| Logging | structlog (JSON or coloured console) |
 | Metrics | prometheus-client |
-| Containerisation | Docker multi-stage + Compose |
-| Tests | pytest-asyncio |
+| Monitoring | Prometheus + Grafana |
+| Container | Docker multi-stage build |
+| Tests | pytest + pytest-asyncio |
 | Linting | ruff |
-| Type checking | mypy (strict) |
-
----
-
-## Environment Variables
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `ANTHROPIC_API_KEY` | — | Enable real Claude AI calls |
-| `ANTHROPIC_MODEL` | `claude-3-5-haiku-20241022` | Model to use |
-| `ATHENA_DB_URL` | — | PostgreSQL DSN for memory + RAG |
-| `ATHENA_EMBEDDER_URL` | — | Embeddings API base URL |
-| `ATHENA_ALLOWED_DOMAINS` | — | Comma-separated domains for HTTPTool |
-| `ATHENA_MAX_CONCURRENT` | `20` | Max concurrent model calls |
-| `ATHENA_MAX_AGENT_ITER` | `10` | Max agent loop iterations |
-| `LOG_LEVEL` | `INFO` | Logging level |
-| `LOG_FORMAT` | — | Set to `json` for production logs |
+| Type checking | mypy strict |
