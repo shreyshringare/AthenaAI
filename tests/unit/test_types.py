@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import dataclasses
-import os
 
 import pytest
 
@@ -36,7 +35,6 @@ from athenai.core.types import (
     TokenUsage,
     TraceSpan,
 )
-
 
 # ---------------------------------------------------------------------------
 # Frozen dataclass instantiation
@@ -153,7 +151,8 @@ def test_routing_context_frozen() -> None:
 
 
 def test_protocol_imports() -> None:
-    for proto in (Model, StreamingModel, MemoryStore, Retriever, Tool, CacheBackend, EmbedderProtocol):
+    for proto in (Model, StreamingModel, MemoryStore, Retriever, Tool, CacheBackend,
+                  EmbedderProtocol):
         assert proto is not None
 
 

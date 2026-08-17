@@ -12,7 +12,6 @@ from athenai.context.engine import BuiltContext, ContextEngine
 from athenai.context.packing import ContextItem, ContextPacker
 from athenai.core.exceptions import ContextOverflowError
 
-
 # ---------------------------------------------------------------------------
 # TokenBudgetManager
 # ---------------------------------------------------------------------------

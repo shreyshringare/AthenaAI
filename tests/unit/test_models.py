@@ -2,16 +2,15 @@
 
 from __future__ import annotations
 
+import httpx
 import pytest
 import respx
-import httpx
 
 from athenai.core.exceptions import ModelUnavailableError, RateLimitError
 from athenai.models.base import ModelRequest, ModelResponse
 from athenai.models.cloud import CloudModel
 from athenai.models.mock import MockModel
 from athenai.models.registry import ModelRegistry
-
 
 # ---------------------------------------------------------------------------
 # Helpers

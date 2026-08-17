@@ -8,7 +8,7 @@ from athenai.core.exceptions import ModelUnavailableError
 from athenai.core.types import RoutingContext
 from athenai.resilience.circuit_breaker import CircuitBreaker, CircuitState
 from athenai.routing.policies import RoutingPolicy
-from athenai.routing.router import ModelRouter, RoutingDecision
+from athenai.routing.router import ModelRouter
 from athenai.routing.scorer import ModelMetadata
 
 
@@ -24,8 +24,12 @@ def _ctx(tokens: int, description: str = "test") -> RoutingContext:
 def _catalog() -> list[ModelMetadata]:
     return [
         ModelMetadata(role="fast", quality_score=0.6, cost_per_1k_tokens=0.003, avg_latency_ms=200),
-        ModelMetadata(role="default", quality_score=0.75, cost_per_1k_tokens=0.015, avg_latency_ms=800),
-        ModelMetadata(role="reasoning", quality_score=0.95, cost_per_1k_tokens=0.075, avg_latency_ms=3000),
+        ModelMetadata(
+            role="default", quality_score=0.75, cost_per_1k_tokens=0.015, avg_latency_ms=800
+        ),
+        ModelMetadata(
+            role="reasoning", quality_score=0.95, cost_per_1k_tokens=0.075, avg_latency_ms=3000
+        ),
     ]
 
 
