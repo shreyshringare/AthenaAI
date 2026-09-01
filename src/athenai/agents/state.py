@@ -1,6 +1,13 @@
 """
 Agent state machine types.
 
+HOW IT FITS IN THE SYSTEM:
+AgentExecutor.run() (executor.py) is the sole caller of transition() and the
+sole producer of AgentStep/AgentResult; Agent.run() (agent.py) just passes
+the resulting AgentResult back up to the gateway. Nothing in this module
+executes model or tool calls — it only defines the vocabulary and legal
+transitions the executor drives itself through.
+
 WHY STATE MACHINE:
 Agent execution is inherently stateful and asynchronous. Encoding valid
 transitions in a lookup table makes illegal state changes detectable at

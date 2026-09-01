@@ -1,4 +1,25 @@
 """
+CloudModel — Anthropic Claude adapter used when a real API key is configured.
+
+HOW IT FITS IN THE SYSTEM:
+gateway/app.py builds this instead of MockModel when ANTHROPIC_API_KEY is
+set in the environment; if construction fails it logs and falls back to
+MockModel so the gateway still boots. AgentExecutor and AthenaRuntime call
+generate() the same way regardless of which adapter is active.
+
+NOTE: generate() only reads the first content block's text
+(data["content"][0]["text"]) from the Anthropic response and does not
+propagate structured tool_use blocks into ModelResponse.metadata — callers
+that need tool calls out of a CloudModel response currently rely on the
+text-based "TOOL_CALL: {...}" protocol described in agents/executor.py,
+the same as MockModel.
+
+ERROR SEMANTICS:
+generate() never returns a partial/failed ModelResponse — network errors,
+timeouts, 429s, and 4xx/5xx status codes all raise (ModelUnavailableError
+or RateLimitError) so callers can apply a single retry/circuit-breaker
+policy instead of checking response fields for failure.
+
 WHY httpx.AsyncClient OVER ANTHROPIC SDK:
 httpx gives us direct control over timeouts, connection pooling, retry hooks,
 and status codes. The SDK abstracts these away, making it harder to integrate
@@ -23,7 +44,14 @@ _DEFAULT_TIMEOUT = 60.0
 
 
 class CloudModel:
-    """Anthropic Claude adapter via httpx async client."""
+    """Anthropic Claude adapter via httpx async client.
+
+    Holds one long-lived httpx.AsyncClient for connection pooling across
+    calls. Callers own its lifetime and must call aclose() on shutdown to
+    release it — core/lifecycle.py's lifespan() does this automatically for
+    any registered component exposing aclose(), but gateway/app.py's own
+    lifespan (the one actually wired up today) does not yet call it.
+    """
 
     def __init__(
         self,
@@ -45,6 +73,13 @@ class CloudModel:
         )
 
     async def generate(self, request: ModelRequest) -> ModelResponse:
+        """Call the Anthropic Messages API and return the reply.
+
+        Raises RateLimitError on HTTP 429 and ModelUnavailableError for
+        timeouts, network errors, auth failures, and any other non-2xx
+        status — never returns a response object for a failed call.
+        Note: request.temperature is not forwarded to the API payload.
+        """
         payload: dict[str, Any] = {
             "model": request.model_name or self.model_name,
             "max_tokens": request.max_tokens,
@@ -89,6 +124,12 @@ class CloudModel:
         )
 
     async def health_check(self) -> bool:
+        """True unless the API is unreachable or returning 5xx.
+
+        Deliberately lenient: a 401/403/404 still counts as "healthy"
+        because it proves the endpoint is reachable — this check is for
+        service availability, not credential validity.
+        """
         try:
             resp = await self._client.get(
                 "https://api.anthropic.com/v1/models",

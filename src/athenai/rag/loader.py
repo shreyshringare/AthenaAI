@@ -1,4 +1,15 @@
-"""DocumentLoader — idempotent ingest pipeline: parse → chunk → embed → store."""
+"""DocumentLoader — idempotent ingest pipeline: parse → chunk → embed → store.
+
+HOW IT FITS IN THE SYSTEM:
+This is the orchestrator for the ingest half of the RAG pipeline (see
+athenai/rag/__init__.py for the full pipeline map). It is constructed once in
+athenai.gateway.app._maybe_add_document_loader and stored on
+app.state.document_loader; the /v1/documents/ingest route in
+athenai.gateway.routes calls .ingest() on it per request. It depends on, but
+does not implement, each pipeline stage — parser, chunker, embedder, and
+retriever are injected so tests can substitute MockEmbedder or an in-memory
+retriever without touching this class.
+"""
 
 from __future__ import annotations
 

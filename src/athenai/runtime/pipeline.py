@@ -2,10 +2,22 @@
 AthenaRuntime — the top-level orchestration layer between the HTTP gateway
 and the model adapters.
 
+HOW IT FITS IN THE SYSTEM:
+`athenai.gateway.app.create_app()` builds one `AthenaRuntime` per process
+(in the FastAPI `lifespan`) and stores it on `app.state.runtime`. The
+`/v1/chat` and `/v1/chat/stream` route handlers in `athenai.gateway.routes`
+call `execute()` / `stream()` on it per request. AthenaRuntime itself calls
+down into a model adapter (`athenai.models.base.Model`, e.g. MockModel or
+CloudModel) — it has no knowledge of tools or the multi-step agent loop
+(that's `athenai.agents.agent.Agent`, which wraps a model directly instead
+of going through this class).
+
 WHY SEMAPHORE:
 Unbounded concurrent model calls exhaust API rate limits and memory.
 BoundedExecutor caps in-flight model calls with an asyncio.Semaphore so
-back-pressure propagates to the HTTP layer as latency, not crashes.
+back-pressure propagates to the HTTP layer as latency, not crashes. The
+semaphore is created once per AthenaRuntime instance and shared across all
+requests handled by that instance, so `max_concurrent` is a process-wide cap.
 
 WHY SEPARATE FROM GATEWAY:
 The runtime does not know about HTTP — it works with AIRequest/AIResponse.
@@ -25,7 +37,13 @@ from athenai.models.base import ModelRequest
 
 
 class AthenaRuntime:
-    """Orchestrates a single model call with concurrency control."""
+    """Orchestrates a single (non-agentic) model call with concurrency control.
+
+    One instance is meant to be created per process and reused across
+    requests — the `asyncio.Semaphore` bounding `max_concurrent` lives on
+    the instance, so constructing a new AthenaRuntime per request would
+    defeat the concurrency cap.
+    """
 
     def __init__(self, model: Any, max_concurrent: int = 20) -> None:
         self._model = model

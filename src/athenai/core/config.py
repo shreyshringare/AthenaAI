@@ -1,4 +1,19 @@
 """
+AthenaConfig — the single source of truth for runtime configuration.
+
+HOW IT FITS IN THE SYSTEM:
+Designed to be constructed once at process startup and threaded through
+`athenai.core.lifecycle.lifespan()` into the component registry, so every
+component (models, tools, resilience primitives) reads its settings from one
+place instead of calling `os.environ` directly.
+
+NOTE FOR NEWCOMERS: as of this writing, `athenai.gateway.app.create_app()`
+does not construct or pass around an AthenaConfig — it reads `os.environ`
+ad hoc and builds its own components directly. AthenaConfig and
+`lifecycle.lifespan()` are the intended integration point for that wiring;
+don't be surprised if you don't see AthenaConfig imported outside of
+lifecycle.py and its tests yet.
+
 WHY PYDANTIC SETTINGS:
 AthenaConfig reads all values from environment variables with type coercion
 and validation at startup — fail fast rather than discovering a missing API
@@ -17,6 +32,15 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class AthenaConfig(BaseSettings):
+    """Env-driven runtime settings, e.g. `ATHENA_LOG_LEVEL=DEBUG` sets `log_level`.
+
+    Fields with dict/list defaults (model_registry, token_budget,
+    allowed_http_domains) use `default_factory` so each AthenaConfig instance
+    gets its own mutable object rather than sharing one across instances —
+    Pydantic will still let you override them wholesale via a JSON-encoded
+    env var (e.g. `ATHENA_TOKEN_BUDGET='{"total": 20000}'`).
+    """
+
     model_config = SettingsConfigDict(
         env_prefix="ATHENA_",
         env_file=".env",

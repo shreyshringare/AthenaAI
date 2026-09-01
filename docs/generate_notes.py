@@ -2,6 +2,21 @@
 Generate phase-wise AthenaAI study notes as a PDF.
 Run: python docs/generate_notes.py
 Output: docs/AthenaAI_Notes.pdf
+
+HOW IT FITS IN THE SYSTEM:
+This is a standalone documentation-generation script, not part of the
+athenai package/runtime — it has no imports from `athenai` and isn't
+imported by anything else in the repo. It reads no external files; all
+content (phase summaries, file tables, "WHY" design-decision notes, gate
+test descriptions) is hand-written inline in this file as reportlab
+Paragraph/Table calls, one `pN_page()` function per project phase (P0-P14).
+`main()` assembles every page function into a single `story` list and
+hands it to reportlab's `SimpleDocTemplate.build()`, which writes the PDF
+to `docs/AthenaAI_Notes.pdf` alongside this script.
+
+Because the notes are hand-written rather than derived from source, this
+script must be updated manually whenever a phase's design decisions change
+— it does not stay in sync with the codebase automatically.
 """
 
 import sys

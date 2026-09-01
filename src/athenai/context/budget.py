@@ -1,4 +1,14 @@
 """
+Per-bucket token accounting for context assembly, with a hard overflow ceiling.
+
+HOW IT FITS IN THE SYSTEM:
+ContextEngine (engine.py) owns one TokenBudgetManager per request and calls
+allocate() as it decides how many tokens each source (system prompt,
+conversation, memory, RAG, tool results) is permitted to consume. It is pure
+bookkeeping — it does not fetch or truncate content itself; callers who hit
+ContextOverflowError are expected to decide what to drop (that decision is
+made one layer up, in ContextPacker).
+
 WHY HARD TOKEN CEILING:
 Silent truncation is a worse failure mode than a loud error. If context silently
 drops memory or RAG chunks, the model hallucinates without the caller knowing why.
@@ -16,7 +26,15 @@ from athenai.core.exceptions import ContextOverflowError
 
 
 class TokenBudgetManager:
-    """Per-bucket token allocation with hard ceiling enforcement."""
+    """Per-bucket token allocation with hard ceiling enforcement.
+
+    `allocations` maps bucket name -> max tokens (e.g. "system", "memory",
+    "rag"). An optional "total" key overrides the global ceiling; otherwise
+    the total is the sum of all bucket limits. Every allocate() call is
+    checked against both its own bucket's limit and the global ceiling, so a
+    request can fail even if its bucket has room left, if doing so would blow
+    the overall budget.
+    """
 
     def __init__(self, allocations: dict[str, int]) -> None:
         self._allocations = dict(allocations)

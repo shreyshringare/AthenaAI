@@ -1,4 +1,17 @@
 """
+Structural interfaces implemented by concrete components across AthenaAI.
+
+HOW IT FITS IN THE SYSTEM:
+These Protocols are the contracts components code against instead of
+concrete classes, e.g. ToolRegistry stores `Tool` instances (tools/registry.py),
+MockModel and CloudModel both satisfy `Model` without inheriting from it or
+importing this module, and the agent loop / runtime accept anything shaped
+like a Model. `@runtime_checkable` allows `isinstance(x, Model)` checks where
+a component's shape needs to be verified at runtime (e.g. picking a model
+adapter at startup), though structural checks only look at method presence,
+not signatures — a class with the right method names but wrong argument
+types still passes isinstance.
+
 WHY PROTOCOL OVER ABC:
 Protocols enable structural subtyping — a class satisfies a Protocol simply
 by having the right methods, without inheriting from it. This decouples the

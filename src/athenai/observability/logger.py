@@ -1,6 +1,13 @@
 """
 Structured logging via structlog.
 
+HOW IT FITS IN THE SYSTEM:
+`athenai.gateway.app`'s FastAPI lifespan calls `configure_logging()` once
+at process startup, before anything else runs (see `lifespan()` in
+`athenai.gateway.app`). Callers get a logger via `get_logger(__name__)`
+and log with structlog's key-value call style, e.g.
+`get_logger(__name__).info("model.init", backend="mock")`.
+
 WHY STRUCTLOG:
 Standard logging emits unstructured strings — grep-able but not queryable.
 structlog emits structured key-value pairs that log aggregators (Datadog,

@@ -21,7 +21,13 @@ from athenai.memory.conversation import ConversationMemory
 
 
 class SummaryModel(Protocol):
-    """Minimal interface needed to generate a summary."""
+    """Minimal interface needed to generate a summary.
+
+    Deliberately narrower than athenai.core.protocols.Model — SummaryMemory
+    only ever calls generate(), so it depends on the smaller structural
+    contract rather than the full Model protocol (any object with a matching
+    generate() satisfies this, including a full Model implementation).
+    """
 
     async def generate(self, request: Any) -> Any: ...
 
@@ -35,6 +41,20 @@ _SUMMARY_PROMPT = (
 
 
 class SummaryMemory:
+    """Decorates ConversationMemory with automatic history compression.
+
+    The generated summary is held in an in-process dict keyed by session_id
+    — not persisted, unlike ConversationMemory's PostgreSQL-backed messages.
+    It is lost on restart and is not shared across multiple server instances;
+    the next get_recent() call after a restart simply regenerates it once
+    the message count crosses max_raw_messages again.
+
+    Each compression regenerates the summary from scratch out of the current
+    window of older messages (see _compress) — it does not fold in the
+    previous summary — so it only ever reflects roughly the last
+    max_raw_messages of history, not the full session.
+    """
+
     def __init__(
         self,
         conversation: ConversationMemory,
@@ -71,6 +91,10 @@ class SummaryMemory:
         return result
 
     async def _compress(self, session_id: str) -> None:
+        """Replace the session's stored summary with a fresh one generated
+        from the older portion of the current max_raw_messages window
+        (everything except the last keep_recent messages). No-op if that
+        older portion is empty."""
         all_messages = await self._conv.get_recent(session_id, n=self._max_raw)
         older = all_messages[:-self._keep_recent]
         if not older:

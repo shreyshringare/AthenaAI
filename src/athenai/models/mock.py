@@ -1,4 +1,14 @@
 """
+MockModel — deterministic echo backend, no API key required.
+
+HOW IT FITS IN THE SYSTEM:
+gateway/app.py constructs this by default and only switches to CloudModel
+when ANTHROPIC_API_KEY is set — see gateway/app.py's _build_model(). This
+makes MockModel the backend behind local dev, Docker Compose demos, CI
+smoke tests, and onboarding: the whole agent loop (AgentExecutor) and
+runtime (AthenaRuntime) work end-to-end against it with zero external
+dependencies.
+
 WHY MockModel:
 Deterministic, zero API keys, instant — all tests run in CI without credentials.
 Echo-back makes assertions trivial: expected output is derivable from input.
@@ -26,6 +36,13 @@ class MockModel:
         self._healthy = True
 
     async def generate(self, request: ModelRequest) -> ModelResponse:
+        """Echo the most recent user message back, prefixed with the model name.
+
+        Only the last message with role="user" is used — prior turns and
+        the system prompt are ignored for content generation (they still
+        count toward the input_tokens estimate). This keeps output
+        trivially predictable for assertions in tests.
+        """
         last_user_msg = ""
         for msg in reversed(request.messages):
             if msg.get("role") == "user":
@@ -53,4 +70,6 @@ class MockModel:
         return self._healthy
 
     def set_healthy(self, healthy: bool) -> None:
+        """Test hook to force health_check() to report unhealthy without
+        needing a real backend to fail."""
         self._healthy = healthy

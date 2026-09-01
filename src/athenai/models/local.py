@@ -1,4 +1,14 @@
-"""LocalModel: Ollama adapter via httpx async."""
+"""
+LocalModel: Ollama adapter via httpx async.
+
+HOW IT FITS IN THE SYSTEM:
+Same Model-protocol shape as MockModel and CloudModel (generate(),
+health_check()) — see athenai.models.base and athenai.core.protocols.
+Not currently wired into gateway/app.py's model selection (which only
+chooses between MockModel and CloudModel); LocalModel is built directly
+by callers that want self-hosted inference, e.g. via ModelRegistry
+config with type="local".
+"""
 
 from __future__ import annotations
 
@@ -29,6 +39,15 @@ class LocalModel:
         self._client = httpx.AsyncClient(timeout=timeout)
 
     async def generate(self, request: ModelRequest) -> ModelResponse:
+        """Flatten the chat-style message list into a single text prompt
+        and call Ollama's /api/generate (a completion endpoint, not a
+        chat endpoint) — Ollama's chat API exists but this adapter uses
+        the simpler completion form, so multi-turn history is rendered
+        as "Role: content" lines rather than sent as structured turns.
+
+        Token counts are estimated as len(text) // 4 (no local tokenizer
+        available); treat them as approximate, not exact.
+        """
         prompt_parts = []
         if request.system:
             prompt_parts.append(f"System: {request.system}")

@@ -1,4 +1,21 @@
 """
+Token bucket rate limiter — caps the throughput of calls to a flaky/quota-
+limited external dependency (e.g. per-provider LLM API rate limits).
+
+HOW IT FITS IN THE SYSTEM:
+Intended to guard outbound calls the same way circuit_breaker.CircuitBreaker
+guards against failures: a caller awaits limiter.acquire() immediately before
+making the protected call, and handles RateLimitError the way it would any
+other backpressure signal (e.g. surface to the caller, or feed into a retry
+policy from athenai.resilience.retry). Unlike a typical rate limiter,
+acquire() never sleeps/waits for tokens — see WHY RAISE, NOT BLOCK below.
+
+WHY RAISE, NOT BLOCK:
+Blocking until tokens are available would let async callers pile up waiting
+on a shared lock with no bound, and hides backpressure from the caller who
+may want to fail fast, shed load, or retry with backoff instead of queueing.
+Raising immediately keeps the decision of what to do next with the caller.
+
 WHY ONE LOCK COVERS BOTH FIELDS:
 token_count and last_refill must be updated atomically. If two coroutines
 interleave between the refill check and the token decrement, both could see
@@ -20,6 +37,13 @@ from athenai.core.exceptions import RateLimitError
 
 
 class TokenBucketRateLimiter:
+    """Lazily-refilling token bucket; refill happens on acquire(), not on a timer.
+
+    There is no background task ticking the bucket — elapsed time since the
+    last acquire() is computed on demand, so an idle limiter costs nothing
+    and naturally catches up to full capacity once enough time has passed.
+    """
+
     def __init__(self, capacity: int, refill_rate: float) -> None:
         """
         Args:
@@ -33,6 +57,12 @@ class TokenBucketRateLimiter:
         self._lock = asyncio.Lock()
 
     async def acquire(self, tokens: int = 1) -> None:
+        """Consume `tokens` from the bucket, refilling first based on elapsed time.
+
+        Raises RateLimitError immediately if insufficient tokens are
+        available — does not wait/retry (see module WHY RAISE, NOT BLOCK).
+        On failure, no tokens are deducted.
+        """
         async with self._lock:
             now = time.monotonic()
             elapsed = now - self._last_refill

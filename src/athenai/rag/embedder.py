@@ -1,4 +1,12 @@
-"""Text embedders — CloudEmbedder (OpenAI-compatible API) and MockEmbedder."""
+"""Text embedders — CloudEmbedder (OpenAI-compatible API) and MockEmbedder.
+
+HOW IT FITS IN THE SYSTEM:
+Third stage of the ingest pipeline (see athenai/rag/__init__.py). Called by
+DocumentLoader.ingest() to turn Chunk text into vectors before
+PgVectorRetriever.store_chunks() persists them. The same embedder type must
+also be used to embed queries at search time, since PgVectorRetriever.search()
+does cosine similarity against whatever embedding space was used at ingest.
+"""
 
 from __future__ import annotations
 
@@ -52,6 +60,13 @@ class CloudEmbedder:
     async def _embed_batch(
         self, client: httpx.AsyncClient, texts: list[str]
     ) -> list[list[float]]:
+        """POST one batch and return embeddings in input order.
+
+        Sorts the response by its `index` field before extracting embeddings —
+        the API contract doesn't guarantee `data` is returned in request order,
+        so relying on response order here would silently mis-pair embeddings
+        with the wrong chunk text.
+        """
         payload: dict[str, Any] = {"model": self._model, "input": texts}
         response = await client.post(
             f"{self._base_url}/v1/embeddings",

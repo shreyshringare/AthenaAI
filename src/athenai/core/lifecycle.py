@@ -1,4 +1,20 @@
 """
+Startup/shutdown orchestration for AthenaAI components.
+
+HOW IT FITS IN THE SYSTEM:
+`lifespan()` is the intended place to construct every long-lived component
+(model registry, context engine, memory, retriever, runtime) from an
+AthenaConfig and tear them down in reverse order on exit. Components are
+looked up later by name via the returned ComponentRegistry dict.
+
+NOTE FOR NEWCOMERS: `athenai.gateway.app.create_app()` currently wires its
+own components directly (reading `os.environ`, not AthenaConfig) inside its
+own `lifespan()` function rather than calling this one — the two are not yet
+connected. This module is the target shape for that wiring, not (yet) the
+thing actually running in production. Don't assume registry["runtime"] etc.
+exist anywhere outside of this module's own tests until that integration
+lands.
+
 WHY asynccontextmanager FOR LIFECYCLE:
 Resource acquisition and release must be paired. Using @asynccontextmanager
 on a single function makes the pairing explicit and compile-checkable — the
@@ -30,6 +46,12 @@ ComponentRegistry = dict[str, Any]
 async def lifespan(config: AthenaConfig) -> AsyncGenerator[ComponentRegistry, None]:
     """
     Startup/shutdown context manager for the AthenaAI runtime.
+
+    Shutdown closes every registered component that exposes a `close()` or
+    `aclose()` method, in reverse registration order (last-started,
+    first-stopped), so components can safely depend on things started before
+    them without shutdown ordering bugs. A component's close failure is
+    logged but does not stop other components from being closed.
 
     Usage:
         async with lifespan(config) as registry:

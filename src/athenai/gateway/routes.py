@@ -9,6 +9,16 @@ Route layout:
   POST /v1/chat/stream      — single-turn chat, Server-Sent Events stream
   POST /v1/agents/run       — multi-step agent with tool use
   POST /v1/documents/ingest — RAG document ingest
+
+HOW IT FITS IN THE SYSTEM:
+This module defines the `router` that app.py mounts onto the FastAPI app.
+Handlers are thin translators: decode the Pydantic request (schemas.py) into
+the internal core types (AIRequest, Message), delegate to the long-lived
+singletons built once at startup in app.py's lifespan (`request.app.state.runtime`
+for /v1/chat*, `request.app.state.agent` for /v1/agents/run), then re-encode
+the internal result back into a Pydantic response schema. No business logic
+lives here — routing failures into HTTPException and bumping metrics counters
+is the extent of it.
 """
 
 from __future__ import annotations
@@ -37,11 +47,18 @@ router = APIRouter()
 
 @router.get("/health", response_model=HealthResponse)
 async def health() -> HealthResponse:
+    """Liveness probe. Deliberately does not touch the model or DB — it only
+    proves the process is alive and serving. Use /ready to check dependencies.
+    """
     return HealthResponse(status="ok")
 
 
 @router.get("/ready", response_model=ReadyResponse)
 async def ready(request: Request) -> ReadyResponse:
+    """Readiness probe: pings the model backend's health_check(). Reaches into
+    runtime._model directly (not a public AthenaRuntime method) since the
+    runtime itself has no notion of "ready" beyond its model being reachable.
+    """
     healthy = await request.app.state.runtime._model.health_check()
     return ReadyResponse(status="ready" if healthy else "not_ready", model_healthy=healthy)
 
@@ -56,6 +73,10 @@ async def metrics() -> StreamingResponse:
 
 @router.post("/v1/chat", response_model=ChatResponse)
 async def chat(body: ChatRequest, request: Request) -> ChatResponse:
+    """Single-turn, non-streaming chat. Mints a fresh request_id/trace_id per
+    call (the client cannot supply its own) so every request is independently
+    traceable in logs/metrics even if the client reuses a session_id.
+    """
     from athenai.observability.metrics import requests_total
 
     req = AIRequest(
@@ -91,6 +112,15 @@ async def chat(body: ChatRequest, request: Request) -> ChatResponse:
 
 @router.post("/v1/chat/stream")
 async def chat_stream(body: ChatRequest, request: Request) -> StreamingResponse:
+    """Streams the chat response as Server-Sent Events.
+
+    Wire format: each model token is sent as `data: {token}\\n\\n`; a failure
+    mid-stream is surfaced as `data: [ERROR] {exc}\\n\\n` rather than an HTTP
+    error status, since the response headers (200 OK) are already flushed by
+    the time an error can occur. The stream always ends with `data: [DONE]\\n\\n`
+    (success or failure) via the `finally` block, so clients have one
+    consistent signal to stop reading.
+    """
     from athenai.observability.metrics import requests_total
 
     req = AIRequest(
@@ -121,6 +151,14 @@ async def chat_stream(body: ChatRequest, request: Request) -> StreamingResponse:
 
 @router.post("/v1/agents/run", response_model=AgentRunResponse)
 async def agent_run(body: AgentRunRequest, request: Request) -> AgentRunResponse:
+    """Run the shared `app.state.agent` to completion on `body.task`.
+
+    Note: `body.tools` and `body.max_iterations` are accepted by the schema
+    but not forwarded here — the agent's tool registry and iteration cap are
+    fixed at process startup (see app.py's lifespan). Per-request overrides
+    would require either a fresh AgentExecutor per call or a registry that
+    supports request-scoped filtering; neither is wired up yet.
+    """
     from athenai.observability.metrics import agent_iterations_total, requests_total
 
     try:
@@ -151,6 +189,14 @@ async def agent_run(body: AgentRunRequest, request: Request) -> AgentRunResponse
 async def document_ingest(
     body: DocumentIngestRequest, request: Request
 ) -> DocumentIngestResponse:
+    """Chunk + embed + store a document for later retrieval.
+
+    Returns 503 (not 500) when the RAG subsystem was never configured —
+    see app.py's _maybe_add_document_loader, which leaves document_loader as
+    None instead of raising when ATHENA_DB_URL/ATHENA_EMBEDDER_URL are unset
+    or unreachable. 503 tells the caller "try again once configured", which
+    is more accurate than a generic server error.
+    """
     loader = getattr(request.app.state, "document_loader", None)
     if loader is None:
         raise HTTPException(

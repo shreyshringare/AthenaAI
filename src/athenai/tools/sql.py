@@ -1,5 +1,12 @@
 """SQLTool — read-only SELECT execution via asyncpg.
 
+HOW IT FITS IN THE SYSTEM:
+Registered into a ToolRegistry (athenai.tools.registry) wherever the host
+application wires up a database pool, and invoked by AgentExecutor
+(athenai.agents.executor) when the model issues a "sql_query" tool call.
+Needs an asyncpg.Pool supplied by the caller — this module owns no
+connection lifecycle of its own.
+
 WHY SELECT-ONLY:
 Tools run inside an agent loop that may call them in parallel. Allowing writes
 creates race conditions and irreversible side effects the agent cannot undo.
@@ -26,6 +33,13 @@ _WRITE_KEYWORDS = frozenset(
 
 
 def _reject_writes(query: str) -> None:
+    """First line of defense: reject any query not starting with SELECT.
+
+    This is a cheap string check, not a parser — it catches the common case
+    but is not the sole safeguard. See module docstring: the readonly=True
+    transaction in SQLTool.execute is what actually stops writes that dodge
+    this check (e.g. via comment injection or semicolon chaining).
+    """
     first_token = query.strip().split()[0].upper() if query.strip() else ""
     if first_token != "SELECT":
         raise ToolDeniedError(
@@ -34,6 +48,8 @@ def _reject_writes(query: str) -> None:
 
 
 class SQLTool:
+    """Tool protocol implementation for bounded, read-only SQL SELECT queries."""
+
     name = "sql_query"
     description = "Execute read-only SQL SELECT queries against the database."
     input_schema: ClassVar[dict[str, Any]] = {
@@ -56,6 +72,11 @@ class SQLTool:
         self._max_rows = max_rows
 
     async def execute(self, arguments: dict[str, Any]) -> list[dict[str, Any]]:
+        """Run the caller's query wrapped as a subquery so a row cap always
+        applies, even if the caller's own query has no LIMIT (or a larger
+        one). The requested limit is clamped to self._max_rows rather than
+        trusted outright, so a caller can lower but never raise the ceiling.
+        """
         query = arguments["query"].strip()
         _reject_writes(query)
 

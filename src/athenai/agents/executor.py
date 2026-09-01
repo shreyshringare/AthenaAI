@@ -1,11 +1,19 @@
 """
 AgentExecutor — the core agentic loop.
 
+HOW IT FITS IN THE SYSTEM:
+Constructed by Agent (agent.py), which just forwards run() calls to it.
+Pulls tool contracts from a ToolRegistry (athenai.tools.registry) to build
+its system prompt, calls model.generate() (athenai.models.base.ModelRequest)
+each iteration, and dispatches tool calls back through the same registry.
+Yields AgentResult/AgentStep/AgentStatus (state.py) as its trace.
+
 HOW THE LOOP WORKS:
 1. Build a system prompt that lists all registered tools.
 2. Call the model with the current message history.
-3. Inspect the response for TOOL_CALL directives (text protocol) or
-   structured tool_calls in response.metadata (Anthropic API format).
+3. Inspect the response for structured tool_calls in response.metadata
+   (currently unused by any adapter) or TOOL_CALL directives (text
+   protocol — the path every adapter actually takes today).
 4. If tool calls found: execute them in parallel via asyncio.gather,
    append results to message history, continue to next iteration.
 5. If no tool calls: treat response as final answer, return AgentResult.
@@ -20,8 +28,10 @@ WHY TEXT PROTOCOL (TOOL_CALL: {...}):
 The Anthropic tool_use block format requires the SDK to encode tool schemas
 into the API request and decode content blocks. The text protocol works with
 any model (including MockModel) without SDK dependency, making the loop
-testable without API keys. CloudModel sets metadata["tool_calls"] for the
-structured path; MockModel falls through to the text parser.
+testable without API keys. The structured response.metadata["tool_calls"]
+path below is checked first but is currently dead in practice: no adapter
+(CloudModel included — see models/cloud.py) populates it yet, so every
+model falls through to the text parser.
 """
 
 from __future__ import annotations
@@ -52,6 +62,19 @@ class AgentExecutor:
         self._max_iterations = max_iterations
 
     async def run(self, task: str, user_id: str = "default") -> AgentResult:
+        """Run the model-tool loop to completion for a single task.
+
+        user_id is accepted for future per-user context/memory scoping but
+        is not currently used inside the loop.
+
+        Normal exit: the model responds with no tool calls, which is taken
+        as the final answer (status COMPLETED).
+
+        Iteration cap exit: if max_iterations is reached without a final
+        answer, status is FAILED and the *last model response seen* is
+        returned as final_answer — callers should check status rather than
+        assume a non-empty final_answer means success.
+        """
         status = AgentStatus.CREATED
         steps: list[AgentStep] = []
         messages: list[dict[str, str]] = [{"role": "user", "content": task}]
@@ -132,7 +155,13 @@ class AgentExecutor:
         )
 
     def _parse_tool_calls(self, content: str) -> list[dict[str, Any]]:
-        """Extract TOOL_CALL: {...} directives from model response text."""
+        """Extract TOOL_CALL: {...} directives from model response text.
+
+        Lines that start with the prefix but fail to parse as a well-formed
+        {"name", "arguments"} JSON object are silently skipped rather than
+        raising — a malformed line from the model should not crash the loop
+        when the rest of the response may still be usable.
+        """
         calls: list[dict[str, Any]] = []
         for line in content.splitlines():
             stripped = line.strip()
@@ -152,6 +181,13 @@ class AgentExecutor:
         return await tool.execute(tool_call["arguments"])
 
     def _build_system_prompt(self) -> str:
+        """Build the system prompt, including the text tool-call protocol.
+
+        Falls back to a plain "helpful assistant" prompt (no TOOL_CALL
+        instructions) when the registry has no tools, so an agent run with
+        an empty registry doesn't confuse the model with a protocol it can
+        never actually use.
+        """
         schemas = self._registry.get_schemas()
         if not schemas:
             return "You are a helpful AI assistant."

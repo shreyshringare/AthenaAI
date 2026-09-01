@@ -1,4 +1,12 @@
-"""Core memory types shared across all memory layers."""
+"""
+Core memory types shared across all memory layers.
+
+HOW IT FITS IN THE SYSTEM:
+Every concrete memory implementation (ConversationMemory, SemanticMemory,
+SummaryMemory, AgentState) returns or consumes MemoryEntry, tagged with a
+MemoryType. This lets callers (e.g. the context engine's memory_fn) treat
+results from different backends uniformly instead of branching per source.
+"""
 
 from __future__ import annotations
 
@@ -8,6 +16,8 @@ from typing import Any
 
 
 class MemoryType(StrEnum):
+    """Identifies which memory layer produced a MemoryEntry."""
+
     WORKING = "working"
     CONVERSATION = "conversation"
     SUMMARY = "summary"

@@ -1,4 +1,14 @@
-"""Model-layer request/response types, separate from core AIRequest/AIResponse."""
+"""
+Model-layer request/response types, separate from core AIRequest/AIResponse.
+
+HOW IT FITS IN THE SYSTEM:
+Every model adapter in this package (MockModel, CloudModel, LocalModel)
+implements `generate(ModelRequest) -> ModelResponse` — this is the shape
+required by the `Model`/`StreamingModel` Protocols in athenai.core.protocols.
+Callers like AgentExecutor and AthenaRuntime build a ModelRequest from
+their own state and pass it to whichever adapter is configured, without
+knowing which backend is behind it.
+"""
 
 from __future__ import annotations
 
@@ -25,7 +35,13 @@ class ModelRequest:
 
 @dataclass(frozen=True)
 class ModelResponse:
-    """Response returned by any Model adapter."""
+    """Response returned by any Model adapter.
+
+    input_tokens/output_tokens are best-effort: real counts from the
+    provider's usage payload for CloudModel, a `len(text) // 4` heuristic
+    for LocalModel and MockModel (no tokenizer available for those paths).
+    Do not treat them as billing-accurate outside CloudModel.
+    """
 
     content: str
     model_name: str

@@ -1,9 +1,12 @@
 """
 Agent — high-level facade over AgentExecutor.
 
-Constructs the executor with sane defaults and exposes a single run() entry
-point. Callers that need fine-grained control (custom registry, iteration
-cap) can use AgentExecutor directly.
+HOW IT FITS IN THE SYSTEM:
+The gateway (athenai.gateway.app) constructs one Agent per app with a model
+and a ToolRegistry, then calls run(task) per incoming request. Agent itself
+holds no loop logic — it just constructs an AgentExecutor with sane defaults
+and forwards run() to it. Callers that need fine-grained control (custom
+registry, iteration cap) can use AgentExecutor directly instead.
 """
 
 from __future__ import annotations
@@ -16,7 +19,13 @@ from athenai.tools.registry import ToolRegistry
 
 
 class Agent:
-    """Autonomous agent that plans and executes tasks using tools."""
+    """Thin wrapper that owns an AgentExecutor and exposes only run().
+
+    Stateless across calls other than the executor's fixed config (model,
+    registry, max_iterations) — each run() call gets its own fresh message
+    history, so one Agent instance is safe to reuse across concurrent
+    requests.
+    """
 
     def __init__(
         self,

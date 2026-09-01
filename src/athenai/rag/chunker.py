@@ -1,4 +1,11 @@
-"""SlidingWindowChunker — overlapping token-approximate text chunks."""
+"""SlidingWindowChunker — overlapping token-approximate text chunks.
+
+HOW IT FITS IN THE SYSTEM:
+Second stage of the ingest pipeline (see athenai/rag/__init__.py). Consumes
+the ParsedDocument produced by DocumentParser and produces the Chunk objects
+that CloudEmbedder/MockEmbedder turn into vectors and PgVectorRetriever
+stores. Called by DocumentLoader.ingest().
+"""
 
 from __future__ import annotations
 
@@ -14,6 +21,10 @@ _CHARS_PER_TOKEN = 4
 
 @dataclass(frozen=True)
 class Chunk:
+    """One overlapping window of a ParsedDocument. `start_char`/`end_char` are
+    offsets into the parent document's normalised content, not the original
+    raw input (which may have had whitespace collapsed by DocumentParser)."""
+
     chunk_id: str
     document_id: str
     content: str
@@ -53,6 +64,14 @@ class SlidingWindowChunker:
         return self._overlap
 
     def chunk(self, document: ParsedDocument) -> list[Chunk]:
+        """Split `document.content` into overlapping chunks.
+
+        Each window is extended backward to the nearest preceding space (via
+        `rfind`) so chunks don't split mid-word; this means actual chunk size
+        can be smaller than `chunk_size` chars. Returns [] for empty content
+        rather than a single empty chunk, so callers can skip embedding/storage
+        for blank documents.
+        """
         text = document.content
         if not text:
             return []

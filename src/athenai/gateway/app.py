@@ -42,6 +42,12 @@ _logger = get_logger(__name__)
 
 
 def _build_model() -> object:
+    """Pick the model backend for this process.
+
+    Falls back to MockModel (not a raised error) if ANTHROPIC_API_KEY is set
+    but CloudModel construction fails — a bad key or missing dependency
+    should degrade the server to mock mode, not crash startup.
+    """
     api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
     if api_key:
         try:
@@ -58,6 +64,10 @@ def _build_model() -> object:
 
 
 def _build_tool_registry() -> ToolRegistry:
+    """Register built-in tools. HTTPTool is only added if ATHENA_ALLOWED_DOMAINS
+    is set, since an HTTP tool with no domain allowlist would let the agent
+    fetch arbitrary URLs — safer to omit the tool than register it wide open.
+    """
     registry = ToolRegistry()
     registry.register(CalculatorTool())
 
@@ -71,6 +81,15 @@ def _build_tool_registry() -> ToolRegistry:
 
 
 async def _maybe_add_document_loader(app: FastAPI, model: object) -> None:
+    """Wire up the RAG document loader, or leave app.state.document_loader as
+    None if unconfigured or unreachable.
+
+    Both the "not configured" and "failed to connect" paths set the same
+    None state rather than raising — RAG is an optional subsystem, and a
+    down Postgres/embedder at startup should not prevent the rest of the
+    gateway (chat, agents) from serving traffic. The /v1/documents/ingest
+    route checks for this None and returns 503 rather than crashing.
+    """
     db_url = os.environ.get("ATHENA_DB_URL", "").strip()
     embedder_url = os.environ.get("ATHENA_EMBEDDER_URL", "").strip()
 
@@ -106,6 +125,11 @@ async def _maybe_add_document_loader(app: FastAPI, model: object) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    """Startup/shutdown hook (see module docstring for init order). Builds one
+    model instance and shares it between `app.state.runtime` (single-turn
+    chat) and `app.state.agent` (multi-step tool use) so both entry points
+    hit the same backend and rate limits.
+    """
     configure_logging()
     _logger.info("athena.starting")
 
@@ -130,6 +154,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 def create_app() -> FastAPI:
+    """Build the FastAPI app instance. Call once; the module-level `app`
+    below is what uvicorn actually serves.
+    """
     app = FastAPI(
         title="AthenaAI",
         description=(

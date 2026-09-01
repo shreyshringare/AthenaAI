@@ -1,5 +1,12 @@
 """ToolValidator — JSON Schema validation then permission check.
 
+HOW IT FITS IN THE SYSTEM:
+Not currently called by AgentExecutor (athenai.agents.executor), which
+dispatches straight to tool.execute() — this is a standalone pre-flight
+check intended for a caller sitting in front of the executor (e.g. an API
+handler) that wants to reject a bad or unauthorized tool call before it
+ever reaches the model loop.
+
 WHY SCHEMA BEFORE PERMISSION:
 Schema validation is a pure in-process dict traversal — zero I/O. Permission
 checks may involve async lookups (policy engine, DB). Failing fast on schema
@@ -26,6 +33,11 @@ _TYPE_MAP: dict[str, type] = {
 
 
 def _validate_schema(schema: dict[str, Any], arguments: dict[str, Any], tool_name: str) -> None:
+    """Check required fields and, for recognized JSON Schema type names,
+    argument types. Unknown properties and unrecognized type names are
+    silently allowed through — this is a best-effort guard against obviously
+    malformed calls, not a full JSON Schema validator.
+    """
     props: dict[str, Any] = schema.get("properties", {})
     required: list[str] = schema.get("required", [])
 
@@ -49,6 +61,13 @@ def _validate_schema(schema: dict[str, Any], arguments: dict[str, Any], tool_nam
 
 
 class ToolValidator:
+    """Stateless pre-flight checks for a tool call: schema shape, then permission.
+
+    The three methods are exposed separately (not just via validate()) so a
+    caller can run only the check it needs — e.g. re-check permissions on a
+    cached, already-schema-valid call without re-validating arguments.
+    """
+
     def validate_schema(self, tool: Tool, arguments: dict[str, Any]) -> None:
         _validate_schema(tool.input_schema, arguments, tool.name)
 

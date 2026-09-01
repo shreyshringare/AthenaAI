@@ -1,4 +1,15 @@
-"""In-flight agent execution state — mutable, in-process only."""
+"""
+In-flight agent execution state — mutable, in-process only.
+
+HOW IT FITS IN THE SYSTEM:
+AgentState is the scratchpad an agent executor's tool-calling loop writes to
+as it runs a single task: which steps it has taken and what each tool call
+returned. It is unrelated to the durable memory layers in this package
+(ConversationMemory, SemanticMemory, SummaryMemory) — those persist across
+turns/sessions, this exists only for the lifetime of one run. snapshot() /
+from_snapshot() let a caller checkpoint or log that run's progress (e.g. for
+debugging or resuming) without keeping the live object around.
+"""
 
 from __future__ import annotations
 
@@ -49,6 +60,7 @@ class AgentState:
 
     @classmethod
     def from_snapshot(cls, data: dict[str, Any]) -> AgentState:
+        """Inverse of snapshot(): rebuild an AgentState from its dict form."""
         state = cls(task=data["task"], session_id=data["session_id"])
         state.steps = data.get("steps", [])
         state.tool_results = data.get("tool_results", [])

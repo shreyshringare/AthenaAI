@@ -1,4 +1,12 @@
 """
+ModelScorer — ranks candidate models by a policy-weighted score.
+
+HOW IT FITS IN THE SYSTEM:
+Used by athenai.routing.router.ModelRouter.select() for MEDIUM-complexity
+requests (LOW/HIGH complexity route directly to a fixed role instead). The
+router passes its filtered list of available ModelMetadata plus the active
+RoutingPolicy; rank() returns them best-first so the router can take [0].
+
 WHY WEIGHTED SCORING OVER HARD CUTOFFS:
 Hard cutoffs (if latency < X: use fast model) require manual tuning per
 deployment and break when model latencies change. Weighted scoring lets the
@@ -30,6 +38,10 @@ class ModelScorer:
     """Computes a weighted score for a model given a routing policy."""
 
     def score(self, model: ModelMetadata, policy: RoutingPolicy) -> float:
+        """Higher is better. Unavailable models score -1.0 as a defensive
+        sentinel — rank() already filters these out before scoring, but
+        score() itself makes no availability assumption about its caller.
+        """
         if not model.is_available:
             return -1.0
 
@@ -43,7 +55,12 @@ class ModelScorer:
         else:
             latency_score = 1.0
 
-        # Normalise each dimension to [0, 1] approximately by capping
+        # Normalise each dimension to [0, 1] approximately by capping.
+        # Divisors are calibrated to the cost/latency ranges seen in a
+        # typical model catalog (~$0.003-0.08 per 1k tokens, ~100-3000ms):
+        # a model at or below ~$0.01/1k or ~100ms saturates at score 1.0,
+        # so the cap rewards "cheap/fast enough" rather than endlessly
+        # favouring ever-smaller numbers.
         cost_norm = min(cost_score / 100.0, 1.0)
         latency_norm = min(latency_score / 0.01, 1.0)
 

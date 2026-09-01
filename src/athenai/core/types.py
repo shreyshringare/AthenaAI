@@ -1,6 +1,15 @@
 """
 Core value types for AthenaAI. All types are frozen dataclasses — immutable
 by design so they can be safely passed across async boundaries and cached.
+
+HOW IT FITS IN THE SYSTEM:
+AIRequest/AIResponse/Message are the spine of the request pipeline: the
+gateway (gateway/routes.py) builds an AIRequest from the incoming HTTP
+payload, athenai.runtime.pipeline.AthenaRuntime processes it and returns an
+AIResponse. RoutingContext is a derived, router-only view of a request
+(athenai.routing.router) built once per request rather than recomputed on
+every routing decision. TraceSpan is the unit of structured tracing recorded
+by the observability layer.
 """
 
 from __future__ import annotations
@@ -19,6 +28,15 @@ class MessageRole(StrEnum):
 
 @dataclass(frozen=True)
 class Message:
+    """A single turn in a conversation.
+
+    `tool_call_id` and `name` only apply to `role=MessageRole.TOOL` messages
+    (a tool's result being fed back to the model) — they're unset for
+    system/user/assistant turns. As of this writing nothing in the codebase
+    constructs a TOOL-role Message yet; the fields exist ahead of that
+    integration.
+    """
+
     role: MessageRole
     content: str
     tool_call_id: str | None = None
@@ -60,6 +78,10 @@ class AIRequest:
             raise ValueError("AIRequest requires at least one message")
 
     def __hash__(self) -> int:
+        # metadata is a dict (unhashable) so it's deliberately excluded from
+        # the hash — two requests that differ only in metadata are treated
+        # as the same cache key. `messages` must stay a tuple (not a list)
+        # for this hash to be computable at all.
         return hash((self.messages, self.user_id, self.session_id, self.request_id))
 
 

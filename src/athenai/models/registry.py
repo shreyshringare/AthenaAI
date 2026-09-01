@@ -1,6 +1,22 @@
 """
 ModelRegistry: config-driven model lookup.
 
+HOW IT FITS IN THE SYSTEM:
+Maps role names (e.g. "fast", "smart", "embedding") to concrete model
+instances built from a config dict at construction time, so callers ask
+for a role ("give me the fast model") instead of knowing which backend
+type/model name backs it. Each entry's config is passed straight to
+_build_model(), which dispatches on config["type"] to MockModel,
+CloudModel, or LocalModel.
+
+NOTE FOR NEWCOMERS: gateway/app.py does not use this class today — it
+builds a single MockModel/CloudModel directly via its own _build_model()
+helper (see gateway/app.py). ModelRegistry is the intended mechanism for
+multi-model setups (e.g. a cheap model for routing, a stronger model for
+final answers) and is exercised by tests/unit/test_models.py; treat it as
+available infrastructure rather than something already wired into the
+running gateway.
+
 WHY CONFIG-DRIVEN:
 Model selection at startup (not at request time) means routing decisions
 are fast lookups, not dynamic instantiation. Rolling to a new model is a
@@ -24,6 +40,12 @@ _MODEL_TYPES: dict[str, type[Any]] = {
 
 
 def _build_model(config: dict[str, str]) -> MockModel | CloudModel | LocalModel:
+    """Instantiate one model from a role's config dict.
+
+    Defaults to type="mock" when "type" is missing, so a role with an
+    incomplete config degrades to a safe, keyless echo model rather than
+    failing to build. Raises ValueError for any unrecognized type.
+    """
     model_type = config.get("type", "mock")
     name = config.get("name", "unknown")
 
@@ -54,6 +76,8 @@ class ModelRegistry:
         self._models[role] = model
 
     def get(self, role: str) -> MockModel | CloudModel | LocalModel:
+        """Return the model for a role. Raises KeyError (not None) on miss,
+        with the list of available roles in the message for debuggability."""
         try:
             return self._models[role]
         except KeyError:

@@ -1,4 +1,16 @@
-"""ModelRouter: selects the best available model for a given routing context."""
+"""
+ModelRouter: selects the best available model for a given routing context.
+
+HOW IT FITS IN THE SYSTEM:
+Entry point for the routing subsystem. Given a RoutingContext (request size,
+task description) and an optional RoutingPolicy, select() first buckets the
+request into a complexity tier (LOW/MEDIUM/HIGH) from estimated token count,
+then either takes the role that matches that tier directly, or — for MEDIUM
+complexity — asks athenai.routing.scorer.ModelScorer to rank all available
+models under the policy's weights. Availability also factors in
+athenai.resilience.circuit_breaker.CircuitBreaker state per model role, so a
+model that's currently failing is skipped in favour of the next-best one.
+"""
 
 from __future__ import annotations
 
@@ -13,6 +25,9 @@ from athenai.routing.scorer import ModelMetadata, ModelScorer
 
 @dataclass(frozen=True)
 class RoutingDecision:
+    """Result of ModelRouter.select() — the chosen model role plus the
+    reasoning/cost context needed for logging and observability."""
+
     selected_role: str
     reason: str
     estimated_cost_usd: float
@@ -58,6 +73,11 @@ class ModelRouter:
         self._scorer = ModelScorer()
 
     def _is_circuit_open(self, role: str) -> bool:
+        # breaker.is_open() alone isn't enough: it returns False once the
+        # cooldown has elapsed even though _state hasn't transitioned to
+        # HALF_OPEN yet (see CircuitBreaker.is_open docstring). Requiring
+        # both checks means a model becomes selectable again as soon as
+        # cooldown elapses, without waiting for an explicit probe call.
         breaker = self._breakers.get(role)
         if breaker is None:
             return False
@@ -68,6 +88,13 @@ class ModelRouter:
         context: RoutingContext,
         policy: RoutingPolicy | None = None,
     ) -> RoutingDecision:
+        """Pick a model role for `context` under `policy` (default policy if None).
+
+        Raises ModelUnavailableError if every model in the catalog is either
+        marked unavailable or behind an open circuit — callers should treat
+        this as "no model can currently serve this request," not retry the
+        same call blindly.
+        """
         policy = policy or RoutingPolicy.default()
         complexity = _classify_complexity(context.estimated_input_tokens)
         preferred_role = _ROLE_FOR_COMPLEXITY[complexity]

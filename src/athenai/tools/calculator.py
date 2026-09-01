@@ -1,10 +1,16 @@
 """CalculatorTool — safe arithmetic via AST walk. Never uses eval().
 
+HOW IT FITS IN THE SYSTEM:
+Registered into a ToolRegistry (athenai.tools.registry) at gateway startup
+(athenai.gateway.app._build_tool_registry) and looked up by name from there
+whenever the model emits a "calculator" tool call inside AgentExecutor's loop
+(athenai.agents.executor).
+
 WHY AST WALK (NOT eval):
 eval() executes arbitrary Python — an attacker passing "__import__('os').system('rm -rf /')"
 would run it. AST walk only permits a whitelist of node types: numeric literals,
-binary operators, and unary minus. Any other node type raises ValueError before
-any computation occurs.
+binary operators, and unary minus. Any other node type raises a ToolDeniedError
+before any computation occurs.
 """
 
 from __future__ import annotations
@@ -26,6 +32,13 @@ _ALLOWED_BINOPS: dict[type, str] = {
 
 
 def _eval_node(node: ast.expr) -> float | int:
+    """Recursively evaluate a single AST node from the whitelisted subset.
+
+    Recurses into BinOp/UnaryOp operands, so the whole expression tree is
+    walked node-by-node rather than compiled — any node type not explicitly
+    matched (function calls, attribute access, names, comprehensions, ...)
+    falls through to the final case and raises ToolDeniedError.
+    """
     match node:
         case ast.Constant(value=v) if isinstance(v, int | float):
             return v
@@ -69,6 +82,13 @@ def _eval_node(node: ast.expr) -> float | int:
 
 
 class CalculatorTool:
+    """Tool protocol implementation exposing safe arithmetic to the agent loop.
+
+    Division, floor-division, and modulo by zero raise ToolDeniedError rather
+    than Python's ZeroDivisionError, so the agent executor sees a uniform
+    error type it already knows how to surface as a failed tool result.
+    """
+
     name = "calculator"
     description = "Evaluates arithmetic expressions safely using AST walk — no eval()."
     input_schema: ClassVar[dict[str, Any]] = {

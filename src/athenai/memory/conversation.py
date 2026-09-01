@@ -1,6 +1,11 @@
 """
 ConversationMemory: PostgreSQL-backed recent message store.
 
+HOW IT FITS IN THE SYSTEM:
+Callers (e.g. a memory_fn wired into athenai.context.engine.ContextEngine, or
+SummaryMemory above it) call add_message() after each turn and get_recent()
+to pull the latest N messages for a session when assembling a prompt.
+
 WHY POSTGRESQL (NOT REDIS):
 Conversation history needs durability across server restarts and deployments.
 Redis is ephemeral by default — a restart wipes all sessions. PostgreSQL gives
@@ -35,11 +40,20 @@ CREATE INDEX IF NOT EXISTS idx_conv_session_created
 
 
 class ConversationMemory:
+    """Per-session, append-only log of chat messages backed by PostgreSQL.
+
+    Table/index creation happens lazily (see create()) rather than via
+    external migrations, so a fresh deployment is usable without a separate
+    schema-setup step.
+    """
+
     def __init__(self, pool: asyncpg.Pool) -> None:
         self._pool = pool
 
     @classmethod
     async def create(cls, dsn: str) -> ConversationMemory:
+        """Async factory: __init__ can't await pool creation/schema setup,
+        so construction goes through this classmethod instead of __init__."""
         pool = await asyncpg.create_pool(dsn, min_size=1, max_size=5)
         instance = cls(pool)
         await instance._ensure_schema()
@@ -57,6 +71,9 @@ class ConversationMemory:
         message_id: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> MemoryEntry:
+        """Insert a message; idempotent if message_id is supplied and
+        already exists (ON CONFLICT DO NOTHING), so retried writes after a
+        network timeout don't duplicate the message."""
         import time
         import uuid
 
@@ -85,6 +102,8 @@ class ConversationMemory:
         )
 
     async def get_recent(self, session_id: str, n: int = 10) -> list[MemoryEntry]:
+        """Return the last n messages, oldest first (the query fetches
+        newest-first for an efficient index scan, then reverses in Python)."""
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 """

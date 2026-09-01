@@ -1,4 +1,21 @@
 """
+Circuit breaker — stops sending calls to a dependency that's already failing.
+
+HOW IT FITS IN THE SYSTEM:
+Wraps calls to flaky external services (LLM provider APIs, tool backends).
+athenai.routing.router.ModelRouter holds one CircuitBreaker per model role
+and consults breaker.state / breaker.is_open() when selecting a model, so a
+model that's erroring gets skipped in favour of the next-best available one
+without any manual intervention. Callers can also route a single async call
+through breaker.call(fn) to get the same protection directly.
+
+STATE MACHINE: CLOSED -> OPEN -> HALF_OPEN -> (CLOSED | OPEN)
+  CLOSED:    normal operation; failures accumulate towards failure_threshold.
+  OPEN:      calls are rejected immediately (CircuitOpenError) without
+             touching the dependency, for cooldown_s seconds.
+  HALF_OPEN: one probe call is allowed through; success closes the circuit,
+             failure reopens it for another full cooldown.
+
 WHY asyncio.Lock FOR CAS (Compare-And-Swap):
 Without a lock, two concurrent tasks could both read the CLOSED state, both
 increment the failure counter past the threshold, and both attempt the
@@ -21,12 +38,21 @@ from athenai.core.exceptions import CircuitOpenError
 
 
 class CircuitState(Enum):
+    """The three states in the circuit breaker state machine (see module docstring)."""
+
     CLOSED = "CLOSED"
     OPEN = "OPEN"
     HALF_OPEN = "HALF_OPEN"
 
 
 class CircuitBreaker:
+    """Per-dependency failure tracker that trips OPEN after repeated failures.
+
+    Not thread-safe across event loops (uses asyncio.Lock), but safe for any
+    number of concurrent coroutines on the same loop. One instance should be
+    shared per logical dependency (e.g. per model role), not per call.
+    """
+
     def __init__(
         self,
         failure_threshold: int = 5,
@@ -53,6 +79,14 @@ class CircuitBreaker:
         return self._state
 
     def is_open(self) -> bool:
+        """Whether calls should currently be rejected.
+
+        Read-only: does NOT perform the OPEN->HALF_OPEN transition even when
+        the cooldown has elapsed — it just reports "cooldown elapsed" by
+        returning False so the caller can proceed. The actual state flip only
+        happens inside the locked _maybe_transition_to_half_open(), invoked
+        from call(). Checking this method alone will not advance the state.
+        """
         if self._state == CircuitState.CLOSED:
             return False
         if self._state == CircuitState.OPEN:
@@ -72,6 +106,13 @@ class CircuitBreaker:
                 self._probe_successes = 0
 
     async def record_failure(self) -> None:
+        """Report a failed call.
+
+        A single failure while HALF_OPEN reopens the circuit immediately —
+        failure_threshold only applies to the initial CLOSED->OPEN trip, not
+        to the probe. A failure while already OPEN is a no-op (state is
+        unaffected; the cooldown timer is not reset).
+        """
         async with self._lock:
             if self._state == CircuitState.HALF_OPEN:
                 self._state = CircuitState.OPEN
@@ -90,6 +131,13 @@ class CircuitBreaker:
                     self._transition_count += 1
 
     async def record_success(self) -> None:
+        """Report a successful call.
+
+        Requires half_open_probe_count consecutive successes while HALF_OPEN
+        before closing the circuit (default 1). While CLOSED, a success just
+        resets the failure counter so isolated errors don't accumulate
+        towards the threshold.
+        """
         async with self._lock:
             if self._state == CircuitState.HALF_OPEN:
                 self._probe_successes += 1
