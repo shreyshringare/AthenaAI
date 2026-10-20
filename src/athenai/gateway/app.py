@@ -12,7 +12,9 @@ COMPONENT INIT ORDER (lifespan):
 6. Runtime — wraps model for single-turn chat; gets a ConversationMemory if
    db_url is reachable, so /v1/chat persists per-session history.
 7. (Optional) DocumentLoader — only if DB URL, embedder URL, and embedder
-   API key are all configured.
+   API key are all configured. Its embedder is wrapped in a CachingEmbedder
+   backed by Redis (if reachable) or an in-process fallback — see
+   _build_embedding_cache.
 
 WHY LIFESPAN OVER on_event:
 FastAPI's @app.on_event("startup") is deprecated. The lifespan context
@@ -144,6 +146,38 @@ async def _maybe_add_conversation_memory(config: AthenaConfig) -> object | None:
         return None
 
 
+_EMBEDDER_MODEL_NAME = "text-embedding-3-small"
+
+
+async def _build_embedding_cache(config: AthenaConfig, registry: dict[str, object]) -> object:
+    """Redis-backed cache if reachable, else an in-process fallback.
+
+    Mirrors every other optional-infra degrade in this module: a down or
+    unconfigured Redis should not prevent RAG from working, just mean the
+    embedding cache doesn't survive a restart or get shared across
+    instances. The ping() check (not just construction) matters because
+    redis.asyncio.from_url() never actually connects — it builds a lazy
+    client that would only fail on first real command, which is exactly
+    the surprise this check avoids at startup instead of mid-request.
+    """
+    try:
+        import redis.asyncio as redis
+
+        client = redis.from_url(config.redis_url)
+        await client.ping()
+
+        from athenai.cache.redis_cache import RedisCache
+
+        registry["embedding_cache_redis"] = client
+        _logger.info("embedding_cache.enabled", backend="redis", redis_url=config.redis_url)
+        return RedisCache(client)
+    except Exception as exc:
+        from athenai.cache.in_memory import InMemoryCache
+
+        _logger.info("embedding_cache.fallback", backend="in_memory", reason=str(exc))
+        return InMemoryCache()
+
+
 async def _maybe_add_document_loader(
     app: FastAPI, config: AthenaConfig, registry: dict[str, object]
 ) -> None:
@@ -182,13 +216,22 @@ async def _maybe_add_document_loader(
         import asyncpg
 
         from athenai.rag.chunker import SlidingWindowChunker
-        from athenai.rag.embedder import CloudEmbedder
+        from athenai.rag.embedder import CachingEmbedder, CloudEmbedder
         from athenai.rag.loader import DocumentLoader
         from athenai.rag.parser import DocumentParser
         from athenai.rag.retriever import PgVectorRetriever
 
         pool = await asyncpg.create_pool(db_url, min_size=2, max_size=10)
-        embedder = CloudEmbedder(api_key=embedder_api_key, base_url=embedder_url)
+        raw_embedder = CloudEmbedder(
+            api_key=embedder_api_key, base_url=embedder_url, model=_EMBEDDER_MODEL_NAME
+        )
+        cache = await _build_embedding_cache(config, registry)
+        embedder = CachingEmbedder(
+            raw_embedder,
+            cache,
+            model_name=_EMBEDDER_MODEL_NAME,
+            ttl_seconds=config.response_cache_ttl_s,
+        )
         retriever = PgVectorRetriever(pool=pool)
         loader = DocumentLoader(
             parser=DocumentParser(),

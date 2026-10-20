@@ -1,4 +1,4 @@
-"""Shared fixtures for integration tests requiring PostgreSQL."""
+"""Shared fixtures for integration tests requiring PostgreSQL or Redis."""
 
 from __future__ import annotations
 
@@ -6,10 +6,16 @@ import os
 
 import asyncpg
 import pytest
+import redis.asyncio as redis
 
 TEST_DB_DSN = os.environ.get(
     "ATHENA_TEST_DB_DSN",
     "postgresql://postgres:test@localhost:5433/athenai_test",
+)
+
+TEST_REDIS_URL = os.environ.get(
+    "ATHENA_TEST_REDIS_URL",
+    "redis://localhost:6380/0",
 )
 
 
@@ -19,6 +25,17 @@ async def db_pool():
     pool = await asyncpg.create_pool(TEST_DB_DSN, min_size=1, max_size=5)
     yield pool
     await pool.close()
+
+
+@pytest.fixture
+async def redis_client():
+    """Function-scoped redis client, flushed before and after each test so
+    tests never see another test's keys."""
+    client = redis.from_url(TEST_REDIS_URL)
+    await client.flushdb()
+    yield client
+    await client.flushdb()
+    await client.aclose()
 
 
 @pytest.fixture(autouse=True)

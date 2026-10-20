@@ -27,6 +27,22 @@ services:
       retries: 10
 
   # ──────────────────────────────────────────────────────────
+  # Redis — embedding cache (athenai.cache.redis_cache.RedisCache)
+  # ──────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    ports:
+      # Same reasoning as postgres above: host-side only, mapped off the
+      # default 6379 in case a local Redis install already holds it. Also
+      # matches tests/integration/conftest.py's ATHENA_TEST_REDIS_URL default.
+      - "6380:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # ──────────────────────────────────────────────────────────
   # AthenaAI API — FastAPI + uvicorn
   # ──────────────────────────────────────────────────────────
   api:
@@ -45,12 +61,15 @@ services:
       ATHENA_GATEWAY_API_KEY: ${ATHENA_GATEWAY_API_KEY:-}
       ATHENA_CORS_ALLOWED_ORIGINS: ${ATHENA_CORS_ALLOWED_ORIGINS:-}
       ATHENA_DB_URL: postgresql://athena:athena@postgres:5432/athena
+      ATHENA_REDIS_URL: redis://redis:6379/0
       ATHENA_MAX_CONCURRENT: "20"
       ATHENA_MAX_AGENT_ITER: "10"
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       LOG_FORMAT: ${LOG_FORMAT:-json}
     depends_on:
       postgres:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\""]

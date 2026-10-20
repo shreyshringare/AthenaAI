@@ -101,13 +101,32 @@ Anthropic API (no `base_url` override exists via env var in `app.py`, and
 that would mean calling a real paid endpoint) — respx-mocked `httpx` calls
 are the same level of verification this class has always used.
 
-## 5. `CacheBackend` implementation
+## 5. `CacheBackend` implementation — DONE (2026-10-20), scoped to embeddings only
 
-`athenai.core.protocols.CacheBackend` (Protocol: `get`/`set`) is defined but
-has zero implementations anywhere in `src/`. This is also why the
-`cache_hits_total` Prometheus counter (`observability/metrics.py`) can never
-fire — there is no cache to hit. Needs:
-- A concrete implementation (in-process dict for dev, Redis-backed for
-  prod — `AthenaConfig.redis_url` already exists and is unused).
-- A decision on what gets cached (model responses keyed on `AIRequest`'s
-  `__hash__`? embeddings? RAG search results?) and where it's consulted.
+Two implementations now exist: `athenai.cache.in_memory.InMemoryCache`
+(process-local, zero dependencies) and `athenai.cache.redis_cache.RedisCache`
+(wraps `redis.asyncio`, JSON-serialised values). `athenai.rag.embedder
+.CachingEmbedder` wraps either behind `EmbedderProtocol`, keyed on
+`sha256(text)` + model name. Wired into `gateway/app.py`'s
+`_build_embedding_cache`: pings Redis at startup, falls back to
+`InMemoryCache` if unreachable — same degrade-to-permissive pattern as
+every other optional infra dependency here. `docker-compose.yml` gained a
+`redis` service (host port `6380`, same "probably already taken on 6379"
+reasoning as Postgres's `5433` remap).
+
+**Deliberately NOT caching chat/agent responses** — this was the original
+framing in this doc, and it's actually wrong, not just low-ROI:
+`embed()` is a deterministic function of `(text, model)` (no sampling), so
+caching it is always correct. Chat completions are NOT — `ModelRequest
+.temperature` defaults to `0.7`, real sampling, so a cached response can be
+a different answer than the model would legitimately give on a repeat
+call. Caching that would be a correctness bug, not a performance win.
+
+Tested: `tests/unit/test_cache.py` (`InMemoryCache` + `CachingEmbedder`
+logic, including cross-model cache isolation), `tests/integration
+/test_redis_cache.py` (`RedisCache` against real Redis, including a real
+`EXPIRE`-based TTL test, not an in-process timer). Verified live: booted
+the real gateway with Redis configured, confirmed `embedding_cache.enabled
+backend=redis`, and ran `CachingEmbedder` + real `RedisCache` together
+against the live container outside the test suite to confirm the second
+identical call was a genuine cache hit (`inner.calls == 1`).
