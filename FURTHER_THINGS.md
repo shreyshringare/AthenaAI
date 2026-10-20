@@ -214,13 +214,21 @@ hand-computed tight budget, graceful no-op when unset). Verified live:
 booted the real gateway, ran `/v1/agents/run`, confirmed 200 + completed
 status through the new request-building path.
 
-## 7. `RelevanceRanker` / embedding-aware retrieval
+## 7. `RelevanceRanker` / embedding-aware retrieval — DONE (2026-10-20)
 
-`RelevanceRanker.rank()` expects candidate chunks carrying their own
-`"embedding"` — but `PgVectorRetriever.search()` computes cosine similarity
-in SQL and only returns the score, never the vector. Wiring `RelevanceRanker`
-for real means either changing `PgVectorRetriever.search()` to also select
-and return each row's `embedding` column (bandwidth/schema decision), or
-accepting it stays unused in favor of `CosineReranker` (already live),
-which fills the equivalent role for the data shape `PgVectorRetriever`
-actually produces.
+`PgVectorRetriever.search()` now also selects `embedding::text` and parses
+it back into `RetrievedChunk.embedding` (new optional field, `None` unless
+fetched). `DocumentLoader.search()` runs `CosineReranker` first (cheap
+re-sort trusting the SQL score, no truncation now), then `RelevanceRanker`
+as the authoritative final step — independently recomputing cosine
+similarity from each candidate's own embedding and truncating to `top_k`,
+a genuine cross-check against the SQL/ANN index's approximation rather
+than a relabeling of the same order.
+
+Tested: `tests/unit/test_rag_relevance_ranker.py` with a stub retriever
+that deliberately hands back candidates in the *wrong* order (to prove
+`RelevanceRanker`'s own cosine math — not the stub's pre-set score —
+determines the final ranking), including a missing-embedding case (scores
+0.0, ranks last, no crash — `RelevanceRanker`'s own documented behavior).
+Existing `tests/integration/test_rag_pipeline.py` cases continue to pass
+against real Postgres with the new `embedding::text` SELECT in place.

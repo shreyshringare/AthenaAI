@@ -44,7 +44,13 @@ CREATE INDEX IF NOT EXISTS idx_chunks_document ON chunks (document_id);
 @dataclass(frozen=True)
 class RetrievedChunk:
     """Search result row. `score` is cosine similarity in [-1, 1] (1 = identical
-    direction), computed as `1 - cosine_distance` from pgvector's `<=>` operator."""
+    direction), computed as `1 - cosine_distance` from pgvector's `<=>` operator.
+
+    `embedding` is optional (None unless search() fetched it) -- it exists
+    so athenai.context.ranking.RelevanceRanker can independently recompute
+    cosine similarity client-side as a final re-score/truncate step
+    downstream of this SQL-side ANN ranking. See DocumentLoader.search().
+    """
 
     chunk_id: str
     document_id: str
@@ -52,6 +58,7 @@ class RetrievedChunk:
     chunk_index: int
     score: float
     metadata: dict[str, Any] = field(default_factory=dict)
+    embedding: list[float] | None = None
 
 
 class PgVectorRetriever:
@@ -129,6 +136,7 @@ class PgVectorRetriever:
             rows = await conn.fetch(
                 """
                 SELECT id, document_id, content, chunk_index, metadata,
+                       embedding::text AS embedding_text,
                        1 - (embedding <=> $1::vector) AS score
                 FROM chunks
                 ORDER BY embedding <=> $1::vector
@@ -150,6 +158,12 @@ class PgVectorRetriever:
                 meta.get(k) == v for k, v in metadata_filter.items()
             ):
                 continue
+            embedding_text = row["embedding_text"]
+            embedding = (
+                [float(x) for x in embedding_text.strip("[]").split(",")]
+                if embedding_text
+                else None
+            )
             results.append(
                 RetrievedChunk(
                     chunk_id=row["id"],
@@ -158,6 +172,7 @@ class PgVectorRetriever:
                     chunk_index=row["chunk_index"],
                     score=float(row["score"]),
                     metadata=meta,
+                    embedding=embedding,
                 )
             )
         return results

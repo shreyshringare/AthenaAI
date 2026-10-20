@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from athenai.context.ranking import RelevanceRanker
 from athenai.rag.chunker import SlidingWindowChunker
 from athenai.rag.embedder import CloudEmbedder, MockEmbedder
 from athenai.rag.parser import DocumentParser
@@ -41,12 +42,14 @@ class DocumentLoader:
         embedder: _AnyEmbedder,
         retriever: PgVectorRetriever,
         reranker: CosineReranker | None = None,
+        relevance_ranker: RelevanceRanker | None = None,
     ) -> None:
         self._parser = parser
         self._chunker = chunker
         self._embedder = embedder
         self._retriever = retriever
         self._reranker = reranker or CosineReranker()
+        self._relevance_ranker = relevance_ranker or RelevanceRanker()
 
     async def ingest(
         self,
@@ -89,13 +92,41 @@ class DocumentLoader:
     ) -> list[RetrievedChunk]:
         """Embed `query` and return the top_k most relevant stored chunks.
 
-        Retrieves 2x top_k candidates from the ANN search before reranking
-        and truncating to top_k -- reranking a set already cut down to
-        top_k can only reorder those same items, not surface a better one
-        the initial ANN pass ranked just outside the cutoff.
+        Retrieves 2x top_k candidates from the ANN search, re-sorts with
+        CosineReranker (cheap, trusts the SQL-computed score), then does
+        the authoritative final re-score + truncate with RelevanceRanker,
+        which independently recomputes cosine similarity from each
+        candidate's own embedding rather than trusting the SQL/ANN score --
+        a cross-check against any approximation error in the SQL-side
+        index, not just a relabeling of the same order.
         """
         [embedding] = await self._embedder.embed([query])
         candidates = await self._retriever.search(
             embedding, k=top_k * 2, metadata_filter=metadata_filter
         )
-        return self._reranker.rerank(embedding, candidates, top_k=top_k)
+        reranked = self._reranker.rerank(embedding, candidates)
+
+        ranked = self._relevance_ranker.rank(
+            embedding,
+            [
+                {
+                    "content": c.content,
+                    "embedding": c.embedding,
+                    "chunk_id": c.chunk_id,
+                    "document_id": c.document_id,
+                    "chunk_index": c.chunk_index,
+                }
+                for c in reranked
+            ],
+            top_k=top_k,
+        )
+        return [
+            RetrievedChunk(
+                chunk_id=r.metadata["chunk_id"],
+                document_id=r.metadata["document_id"],
+                content=r.content,
+                chunk_index=r.metadata["chunk_index"],
+                score=r.score,
+            )
+            for r in ranked
+        ]
