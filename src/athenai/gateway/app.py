@@ -11,7 +11,8 @@ COMPONENT INIT ORDER (lifespan):
 5. Agent — wraps model + registry.
 6. Runtime — wraps model for single-turn chat; gets a ConversationMemory if
    db_url is reachable, so /v1/chat persists per-session history.
-7. (Optional) DocumentLoader — only if DB + embedder URLs are configured.
+7. (Optional) DocumentLoader — only if DB URL, embedder URL, and embedder
+   API key are all configured.
 
 WHY LIFESPAN OVER on_event:
 FastAPI's @app.on_event("startup") is deprecated. The lifespan context
@@ -137,13 +138,27 @@ async def _maybe_add_document_loader(
     None state rather than raising — RAG is an optional subsystem, and a
     down Postgres/embedder at startup should not prevent the rest of the
     gateway (chat, agents) from serving traffic. The /v1/documents/ingest
-    route checks for this None and returns 503 rather than crashing.
+    and /v1/documents/search routes check for this None and return 503
+    rather than crashing.
+
+    ATHENA_EMBEDDER_API_KEY gates alongside ATHENA_DB_URL/ATHENA_EMBEDDER_URL
+    rather than being read inside the try block: CloudEmbedder.__init__
+    requires api_key with no default, so constructing it without one is a
+    startup-time bug, not a reachability failure -- gating here makes a
+    missing key degrade to "rag.disabled" (expected, like the other two
+    unset-config cases) instead of surfacing as "rag.init_failed" noise.
     """
     db_url = config.db_url.strip()
     embedder_url = os.environ.get("ATHENA_EMBEDDER_URL", "").strip()
+    embedder_api_key = os.environ.get("ATHENA_EMBEDDER_API_KEY", "").strip()
 
-    if not db_url or not embedder_url:
-        _logger.info("rag.disabled", reason="ATHENA_DB_URL or ATHENA_EMBEDDER_URL not set")
+    if not db_url or not embedder_url or not embedder_api_key:
+        _logger.info(
+            "rag.disabled",
+            reason=(
+                "ATHENA_DB_URL, ATHENA_EMBEDDER_URL, or ATHENA_EMBEDDER_API_KEY not set"
+            ),
+        )
         app.state.document_loader = None
         return
 
@@ -157,7 +172,7 @@ async def _maybe_add_document_loader(
         from athenai.rag.retriever import PgVectorRetriever
 
         pool = await asyncpg.create_pool(db_url, min_size=2, max_size=10)
-        embedder = CloudEmbedder(base_url=embedder_url)
+        embedder = CloudEmbedder(api_key=embedder_api_key, base_url=embedder_url)
         retriever = PgVectorRetriever(pool=pool)
         loader = DocumentLoader(
             parser=DocumentParser(),
