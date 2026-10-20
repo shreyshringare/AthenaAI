@@ -33,12 +33,18 @@ class Agent:
         tool_registry: ToolRegistry | None = None,
         max_iterations: int = 10,
         allowed_tools: set[str] | None = None,
+        context_engine: Any = None,
+        document_loader: Any = None,
+        rag_top_k: int = 3,
     ) -> None:
         self._executor = AgentExecutor(
             model=model,
             tool_registry=tool_registry or ToolRegistry(),
             max_iterations=max_iterations,
             allowed_tools=allowed_tools,
+            context_engine=context_engine,
+            document_loader=document_loader,
+            rag_top_k=rag_top_k,
         )
 
     async def run(self, task: str, user_id: str = "default") -> AgentResult:

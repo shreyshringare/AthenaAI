@@ -173,15 +173,46 @@ backend=redis`, and ran `CachingEmbedder` + real `RedisCache` together
 against the live container outside the test suite to confirm the second
 identical call was a genuine cache hit (`inner.calls == 1`).
 
-## 6. `AgentExecutor` (tool-use loop) `ContextEngine` integration
+## 6. `AgentExecutor` (tool-use loop) `ContextEngine` integration — DONE (2026-10-20)
 
-Scoped out of item #1 above. Would need its own design pass: the tool-use
-system prompt already carries protocol instructions + tool schemas (see
-`_build_system_prompt`), tool results get injected mid-loop rather than at
-turn start, and `ModelRequest.metadata["tools"]` (wired for `CloudModel`
-native tool-use) would need to coexist with whatever `ContextEngine`
-reconstruction scheme is used. Not simply "copy the `AthenaRuntime`
-pattern" without checking those interactions first.
+`AgentExecutor` now accepts the same `context_engine`/`document_loader`/
+`rag_top_k` as `AthenaRuntime`, wired from `gateway/app.py` into `Agent`.
+Two real differences from `AthenaRuntime`'s integration, both because
+there's no cross-call session concept for agent runs (no `session_id`
+anywhere in `Agent`/`AgentExecutor`/the `/v1/agents/run` route):
+- `memory_fn` always returns `[]` — nothing to fetch. `ContextEngine` is
+  used here for RAG-augmenting the task and budgeting the transcript
+  *within* one run, not persisted history.
+- The `"conversation"` bucket carries the *entire* accumulated transcript
+  (task + every tool result + assistant turn so far), not just "the new
+  turn" — that transcript is what's actually at risk of exceeding budget
+  as `max_iterations` grows it.
+
+`encode_role_content`/`decode_role_content` moved to a shared
+`athenai.context.encoding` module (was private to `runtime/pipeline.py`)
+and gained an optional `name` field — tool-result messages carry a `name`
+identifying which tool produced the result, and that needs to survive
+the round trip same as role/content.
+
+**Found and fixed while writing this, retroactively applied to
+`AthenaRuntime` too**: `ContextPacker.pack()` is a greedy *forward* scan
+within a bucket — it keeps the first items that fit and skips (doesn't
+stop at) the rest. A chronologically-ordered bucket (oldest-first, how
+both `ConversationMemory.get_recent()` and an append-built transcript
+naturally come) fed to it as-is means a tight budget keeps old content
+and drops recent content — backwards for conversation truncation. Fixed
+by reversing to newest-first before `build()` and reversing back on
+reconstruction, in both `AthenaRuntime` and `AgentExecutor`. Caught by a
+hand-computed regression test (`test_context_engine_drops_oldest_memory_first_not_newest`,
+`test_context_engine_drops_oldest_transcript_first_not_newest`) that
+fails under the old ordering and passes under the fix — not a vague
+"fewer items survived" assertion.
+
+Tested: `tests/unit/test_executor_context_engine.py` (RAG query uses the
+task text, tool `name` round-trips, oldest-drops-first under a
+hand-computed tight budget, graceful no-op when unset). Verified live:
+booted the real gateway, ran `/v1/agents/run`, confirmed 200 + completed
+status through the new request-building path.
 
 ## 7. `RelevanceRanker` / embedding-aware retrieval
 

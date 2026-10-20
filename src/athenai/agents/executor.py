@@ -46,6 +46,32 @@ of, so the text protocol remains the only way they can signal a tool call
 structured response.metadata["tool_calls"] path is checked first; a
 populated list always wins and _parse_tool_calls() on the text content
 never runs. No double-execution risk.
+
+OPTIONAL ContextEngine INTEGRATION (context_engine/document_loader):
+When set, every iteration routes the growing in-loop transcript + RAG
+through athenai.context.engine.ContextEngine before calling the model,
+same token-budgeted/priority-dropped machinery athenai.runtime.pipeline
+.AthenaRuntime uses for /v1/chat*. context_engine=None (the default)
+keeps this class's behavior exactly as before -- purely additive.
+
+Two differences from AthenaRuntime's integration, both because there is
+no cross-call session concept for agent runs today (no session_id
+anywhere in Agent/AgentExecutor/the /v1/agents/run route):
+- memory_fn always returns [] -- there is nothing to fetch. ContextEngine
+  is used here for RAG augmentation of the task and for budgeting the
+  transcript *within* this one run, not for persisted history.
+- The "conversation" bucket carries the *entire* accumulated transcript
+  (task + every tool result + assistant turn so far this run), not just
+  "the new turn" -- that transcript is what's actually at risk of
+  exceeding the budget as max_iterations grows it.
+
+Same ContextPacker subtlety as AthenaRuntime: it greedily keeps the
+*first* items of a bucket that fit and drops the rest once the ceiling
+is hit. The transcript is naturally oldest-first (it's built by
+appending), so handed to the packer as-is a tight budget would keep the
+oldest turns and drop the most recent ones -- backwards. _build_model_request
+reverses to newest-first before packing and reverses back afterward, same
+fix as AthenaRuntime's memory bucket.
 """
 
 from __future__ import annotations
@@ -55,12 +81,16 @@ import json
 from typing import Any
 
 from athenai.agents.state import AgentResult, AgentStatus, AgentStep, transition
+from athenai.context.encoding import decode_role_content, encode_role_content
 from athenai.models.base import ModelRequest
+from athenai.observability.logger import get_logger
 from athenai.tools.registry import ToolRegistry
 from athenai.tools.validator import ToolValidator
 
+_logger = get_logger(__name__)
 _MAX_ITERATIONS = 10
 _TOOL_CALL_PREFIX = "TOOL_CALL:"
+_DEFAULT_RAG_TOP_K = 3
 
 
 class AgentExecutor:
@@ -72,12 +102,18 @@ class AgentExecutor:
         tool_registry: ToolRegistry,
         max_iterations: int = _MAX_ITERATIONS,
         allowed_tools: set[str] | None = None,
+        context_engine: Any = None,
+        document_loader: Any = None,
+        rag_top_k: int = _DEFAULT_RAG_TOP_K,
     ) -> None:
         self._model = model
         self._registry = tool_registry
         self._max_iterations = max_iterations
         self._validator = ToolValidator()
         self._allowed_tools = allowed_tools
+        self._context_engine = context_engine
+        self._document_loader = document_loader
+        self._rag_top_k = rag_top_k
 
     async def run(self, task: str, user_id: str = "default") -> AgentResult:
         """Run the model-tool loop to completion for a single task.
@@ -103,12 +139,7 @@ class AgentExecutor:
         status = transition(status, AgentStatus.RUNNING)
 
         for iteration in range(self._max_iterations):
-            request = ModelRequest(
-                messages=messages,
-                model_name="agent",
-                system=system,
-                metadata={"tools": schemas},
-            )
+            request = await self._build_model_request(messages, system, schemas, task)
             response = await self._model.generate(request)
 
             # Prefer structured tool calls from model metadata (CloudModel path)
@@ -173,6 +204,71 @@ class AgentExecutor:
             steps=steps,
             total_iterations=self._max_iterations,
             status=status,
+        )
+
+    async def _build_model_request(
+        self,
+        messages: list[dict[str, str]],
+        system: str,
+        schemas: list[dict[str, Any]],
+        task: str,
+    ) -> ModelRequest:
+        """Plain path (context_engine=None) builds the exact ModelRequest
+        this class always has. The ContextEngine path additionally
+        RAG-augments and token-budgets the transcript -- see class
+        docstring's "OPTIONAL ContextEngine INTEGRATION" note for why
+        memory_fn is always empty and the transcript (not just "the new
+        turn") is what gets budgeted here.
+        """
+        if self._context_engine is None:
+            return ModelRequest(
+                messages=messages, model_name="agent", system=system, metadata={"tools": schemas}
+            )
+
+        async def memory_fn() -> list[str]:
+            return []
+
+        async def rag_fn() -> list[str]:
+            if self._document_loader is None:
+                return []
+            try:
+                results = await self._document_loader.search(task, top_k=self._rag_top_k)
+            except Exception as exc:
+                _logger.warning("executor.rag_fn_failed", reason=str(exc))
+                return []
+            return [r.content for r in results]
+
+        # Newest-first -- see class docstring's ContextPacker note.
+        conversation = [
+            encode_role_content(m["role"], m["content"], m.get("name"))
+            for m in reversed(messages)
+        ]
+
+        built = await self._context_engine.build(
+            system_prompt=system,
+            conversation=conversation,
+            memory_fn=memory_fn,
+            rag_fn=rag_fn,
+        )
+
+        conversation_messages = [
+            decode_role_content(item.content)
+            for item in reversed(
+                [item for item in built.packed.items if item.bucket == "conversation"]
+            )
+        ]
+
+        system_parts = [item.content for item in built.packed.items if item.bucket == "system"]
+        rag_parts = [item.content for item in built.packed.items if item.bucket == "rag"]
+        if rag_parts:
+            system_parts.append("Relevant context:\n" + "\n\n".join(rag_parts))
+        final_system = "\n\n".join(system_parts)
+
+        return ModelRequest(
+            messages=conversation_messages,
+            model_name="agent",
+            system=final_system,
+            metadata={"tools": schemas},
         )
 
     def _parse_tool_calls(self, content: str) -> list[dict[str, Any]]:

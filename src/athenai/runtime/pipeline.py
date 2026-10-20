@@ -58,6 +58,18 @@ as-is — backwards for a chat transcript. _build_messages_with_context_engine
 reassembles by bucket into the correct chronological order (memory then
 conversation) rather than trusting packed.items' overall sequence.
 
+WHY memory_fn RETURNS HISTORY NEWEST-FIRST, NOT CHRONOLOGICAL:
+ContextPacker.pack() is a greedy forward scan within a bucket: it keeps
+the *first* items that fit and drops everything after the ceiling is
+hit. ConversationMemory.get_recent() returns oldest-first — fed to the
+packer as-is, a tight budget would keep the *oldest* history and drop
+the *most recent* turns, which is backwards for conversation truncation
+(you want to drop old history and keep what just happened). Reversing
+to newest-first before packing makes "keep the first N that fit, drop
+the rest" mean "keep the most recent N, drop the oldest" — then
+reconstruction reverses back to chronological order for the actual
+message list.
+
 CONTRACT WHEN memory IS SET (either path):
 Callers (gateway routes) should send only the *new* turn(s) in
 `request.messages`, not replayed history — execute()/stream() prepend the
@@ -72,6 +84,7 @@ import uuid
 from collections.abc import AsyncIterator
 from typing import Any
 
+from athenai.context.encoding import decode_role_content, encode_role_content
 from athenai.core.types import AIRequest, AIResponse, TokenUsage
 from athenai.models.base import ModelRequest
 from athenai.observability.logger import get_logger
@@ -95,16 +108,6 @@ def _memory_role_and_content(entry: Any) -> tuple[str, str]:
     prefix = f"{role}: "
     content = entry.content[len(prefix):] if entry.content.startswith(prefix) else entry.content
     return role, content
-
-
-def _encode_role_content(role: str, content: str) -> str:
-    """See module docstring's "WHY A CUSTOM \\x00 ENCODING" note."""
-    return f"{role}\x00{content}"
-
-
-def _decode_role_content(encoded: str) -> dict[str, str]:
-    role, _, content = encoded.partition("\x00")
-    return {"role": role, "content": content}
 
 
 class AthenaRuntime:
@@ -162,7 +165,12 @@ class AthenaRuntime:
             if self._memory is None:
                 return []
             history = await self._memory.get_recent(request.session_id)
-            return [_encode_role_content(*_memory_role_and_content(e)) for e in history]
+            # Newest-first -- see module docstring's "WHY memory_fn RETURNS
+            # HISTORY NEWEST-FIRST" note. get_recent() itself returns
+            # oldest-first, so reverse here.
+            return [
+                encode_role_content(*_memory_role_and_content(e)) for e in reversed(history)
+            ]
 
         async def rag_fn() -> list[str]:
             if self._document_loader is None or not request.messages:
@@ -175,7 +183,7 @@ class AthenaRuntime:
                 return []
             return [r.content for r in results]
 
-        conversation = [_encode_role_content(str(m.role), m.content) for m in request.messages]
+        conversation = [encode_role_content(str(m.role), m.content) for m in request.messages]
 
         built = await self._context_engine.build(
             system_prompt=_DEFAULT_SYSTEM_PROMPT,
@@ -186,14 +194,16 @@ class AthenaRuntime:
 
         # Reassemble in chronological order (memory/history, then the
         # current turn) — packed.items is grouped by bucket priority, not
-        # presentation order. See module docstring.
+        # presentation order, and memory survivors are still newest-first
+        # (see memory_fn above) so reverse back to chronological here.
         memory_messages = [
-            _decode_role_content(item.content)
-            for item in built.packed.items
-            if item.bucket == "memory"
+            decode_role_content(item.content)
+            for item in reversed(
+                [item for item in built.packed.items if item.bucket == "memory"]
+            )
         ]
         conversation_messages = [
-            _decode_role_content(item.content)
+            decode_role_content(item.content)
             for item in built.packed.items
             if item.bucket == "conversation"
         ]

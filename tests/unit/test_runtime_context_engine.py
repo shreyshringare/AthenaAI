@@ -178,6 +178,49 @@ async def test_context_engine_drops_rag_before_memory_under_tight_budget() -> No
 
 
 @pytest.mark.asyncio
+async def test_context_engine_drops_oldest_memory_first_not_newest() -> None:
+    """ContextPacker greedily keeps the *first* items of a bucket that fit
+    and drops the rest once the ceiling is hit. memory_fn must therefore
+    hand it entries newest-first (so "drop the rest" means "drop the
+    oldest"), then restore chronological order when reconstructing --
+    otherwise a tight budget would drop the *most recent* history and
+    keep stale old turns, which is backwards for conversation truncation.
+    """
+    captured_requests = []
+
+    class CapturingModel:
+        name = "capture"
+
+        async def generate(self, request):
+            from athenai.models.base import ModelResponse
+
+            captured_requests.append(request)
+            return ModelResponse(content="ok", model_name=self.name, input_tokens=1, output_tokens=1)
+
+        async def health_check(self):
+            return True
+
+    # Oldest to newest, as ConversationMemory.get_recent() returns them.
+    memory = _StubMemory(
+        [
+            _MemoryEntry("user", "oldest " + "a" * 30),
+            _MemoryEntry("user", "middle " + "b" * 30),
+            _MemoryEntry("user", "newest " + "c" * 30),
+        ]
+    )
+    # Budget fits system + conversation + exactly one memory entry.
+    engine = _engine({"total": 20})
+
+    runtime = AthenaRuntime(model=CapturingModel(), memory=memory, context_engine=engine)
+    await runtime.execute(_request("s1", "hi"))
+
+    contents = " ".join(m["content"] for m in captured_requests[0].messages)
+    assert "newest" in contents
+    assert "oldest" not in contents
+    assert "middle" not in contents
+
+
+@pytest.mark.asyncio
 async def test_context_engine_without_document_loader_skips_rag() -> None:
     memory = _StubMemory([])
     engine = _engine({"total": 2000})

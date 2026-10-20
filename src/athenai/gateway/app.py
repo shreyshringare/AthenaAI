@@ -18,9 +18,12 @@ COMPONENT INIT ORDER (lifespan):
    from config.token_budget) so /v1/chat* turns are token-budgeted and
    RAG-augmented via the DocumentLoader from step 5, instead of a plain
    history prepend.
-7. Agent — wraps model + registry (does not go through ContextEngine —
-   see athenai.agents.executor's own docstring for why its message shape
-   is handled separately).
+7. Agent — wraps model + registry; also gets the same ContextEngine +
+   DocumentLoader as Runtime (step 6), but AgentExecutor uses them
+   differently (RAG-augments the task, budgets the whole growing in-loop
+   transcript rather than "new turn" + persisted history — there's no
+   cross-call session concept for agent runs) — see AgentExecutor's own
+   docstring for the details.
 
 WHY LIFESPAN OVER on_event:
 FastAPI's @app.on_event("startup") is deprecated. The lifespan context
@@ -315,6 +318,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             tool_registry=tool_registry,
             max_iterations=int(os.environ.get("ATHENA_MAX_AGENT_ITER", "10")),
             allowed_tools=allowed_tools,
+            context_engine=context_engine,
+            document_loader=app.state.document_loader,
         )
 
         _logger.info("athena.ready")
