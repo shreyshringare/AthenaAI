@@ -8,6 +8,7 @@ invoke during its reasoning loop. base.py defines the shared ToolResult type
 and registry.py provides ToolRegistry, which the gateway (athenai.gateway.app)
 populates at startup and AgentExecutor (athenai.agents.executor) queries to
 build its system prompt and dispatch tool calls. validator.py provides
-ToolValidator for callers that want to check a tool call's arguments and
-permissions before invoking execute().
+ToolValidator; AgentExecutor runs its validate_schema() check on every tool
+call before invoking execute(). validate_permission() is not wired in — it's
+available for callers that need a per-user allowed_tools check.
 """

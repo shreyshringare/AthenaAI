@@ -146,6 +146,49 @@ async def test_executor_stops_at_max_iterations():
 
 
 @pytest.mark.asyncio
+async def test_executor_rejects_invalid_arguments_before_execute():
+    """Schema validation runs before tool.execute() — a malformed call never
+    reaches the tool, and surfaces as a captured error, not a crash."""
+
+    class OneCallModel:
+        name = "once"
+        _calls = 0
+
+        async def generate(self, request):
+            from athenai.models.base import ModelResponse
+
+            self.__class__._calls += 1
+            if self.__class__._calls == 1:
+                # Missing the required "expression" argument.
+                return ModelResponse(
+                    content='TOOL_CALL: {"name": "calculator", "arguments": {}}',
+                    model_name=self.name,
+                    input_tokens=5,
+                    output_tokens=5,
+                )
+            return ModelResponse(
+                content="Recovered.",
+                model_name=self.name,
+                input_tokens=5,
+                output_tokens=5,
+            )
+
+        async def health_check(self):
+            return True
+
+    registry = ToolRegistry()
+    registry.register(CalculatorTool())
+
+    executor = AgentExecutor(model=OneCallModel(), tool_registry=registry)
+    result = await executor.run("Compute something")
+
+    error_step = result.steps[0]
+    assert len(error_step.tool_results) == 1
+    assert "required argument 'expression' missing" in error_step.tool_results[0]["error"]
+    assert result.status == AgentStatus.COMPLETED
+
+
+@pytest.mark.asyncio
 async def test_executor_handles_tool_error_gracefully():
     class ErrorTool:
         name = "error_tool"

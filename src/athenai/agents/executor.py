@@ -5,8 +5,10 @@ HOW IT FITS IN THE SYSTEM:
 Constructed by Agent (agent.py), which just forwards run() calls to it.
 Pulls tool contracts from a ToolRegistry (athenai.tools.registry) to build
 its system prompt, calls model.generate() (athenai.models.base.ModelRequest)
-each iteration, and dispatches tool calls back through the same registry.
-Yields AgentResult/AgentStep/AgentStatus (state.py) as its trace.
+each iteration, and dispatches tool calls back through the same registry —
+each call is schema-validated via ToolValidator (athenai.tools.validator)
+before tool.execute() runs. Yields AgentResult/AgentStep/AgentStatus
+(state.py) as its trace.
 
 HOW THE LOOP WORKS:
 1. Build a system prompt that lists all registered tools.
@@ -43,6 +45,7 @@ from typing import Any
 from athenai.agents.state import AgentResult, AgentStatus, AgentStep, transition
 from athenai.models.base import ModelRequest
 from athenai.tools.registry import ToolRegistry
+from athenai.tools.validator import ToolValidator
 
 _MAX_ITERATIONS = 10
 _TOOL_CALL_PREFIX = "TOOL_CALL:"
@@ -60,6 +63,7 @@ class AgentExecutor:
         self._model = model
         self._registry = tool_registry
         self._max_iterations = max_iterations
+        self._validator = ToolValidator()
 
     async def run(self, task: str, user_id: str = "default") -> AgentResult:
         """Run the model-tool loop to completion for a single task.
@@ -177,7 +181,18 @@ class AgentExecutor:
         return calls
 
     async def _execute_tool(self, tool_call: dict[str, Any]) -> Any:
+        """Look up, schema-validate, then execute a single tool call.
+
+        Only validate_schema() runs here, not the full validate() (which also
+        checks per-user permissions) — there's no allowed_tools concept
+        plumbed through the agent loop yet, so a permission check here would
+        have nothing real to check against. Schema validation alone still
+        catches the common failure mode (missing/mistyped arguments) before
+        it reaches tool.execute(), and raises the same ToolDeniedError the
+        caller already handles via asyncio.gather(return_exceptions=True).
+        """
         tool = self._registry.get(tool_call["name"])
+        self._validator.validate_schema(tool, tool_call["arguments"])
         return await tool.execute(tool_call["arguments"])
 
     def _build_system_prompt(self) -> str:

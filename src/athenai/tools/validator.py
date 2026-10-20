@@ -1,11 +1,13 @@
 """ToolValidator — JSON Schema validation then permission check.
 
 HOW IT FITS IN THE SYSTEM:
-Not currently called by AgentExecutor (athenai.agents.executor), which
-dispatches straight to tool.execute() — this is a standalone pre-flight
-check intended for a caller sitting in front of the executor (e.g. an API
-handler) that wants to reject a bad or unauthorized tool call before it
-ever reaches the model loop.
+AgentExecutor._execute_tool (athenai.agents.executor) calls validate_schema()
+on every tool call before tool.execute(), catching missing/mistyped
+arguments up front. validate_permission() (and therefore the combined
+validate()) is not wired into the executor — there is no allowed_tools
+concept plumbed through the agent loop yet, so a caller that needs
+per-user permission checks should call validate_permission() itself
+before invoking the executor.
 
 WHY SCHEMA BEFORE PERMISSION:
 Schema validation is a pure in-process dict traversal — zero I/O. Permission
