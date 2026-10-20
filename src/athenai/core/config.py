@@ -60,7 +60,13 @@ class AthenaConfig(BaseSettings):
     redis_url: str = Field(default="redis://localhost:6379/0")
 
     # Anthropic
-    anthropic_api_key: str = Field(default="")
+    #
+    # validation_alias bypasses env_prefix for this one field: the rest of
+    # the codebase (docker-compose.yml, README, gateway/app.py before this
+    # wiring) reads the unprefixed ANTHROPIC_API_KEY, matching Anthropic's
+    # own SDK convention. Without this override, AthenaConfig would silently
+    # look for ATHENA_ANTHROPIC_API_KEY instead and never see a real key.
+    anthropic_api_key: str = Field(default="", validation_alias="ANTHROPIC_API_KEY")
     anthropic_base_url: str = Field(default="https://api.anthropic.com")
 
     # Model registry: maps role name → model config dict

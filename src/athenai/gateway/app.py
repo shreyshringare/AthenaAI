@@ -3,11 +3,15 @@ FastAPI application factory.
 
 COMPONENT INIT ORDER (lifespan):
 1. Logging — everything else logs, so configure first.
-2. Model — MockModel by default; CloudModel when ANTHROPIC_API_KEY set.
-3. Tool registry — register all built-in tools.
-4. Agent — wraps model + registry.
-5. Runtime — wraps model for single-turn chat.
-6. (Optional) DocumentLoader — only if DB + embedder URLs are configured.
+2. AthenaConfig — load once from env, threaded into core.lifecycle.lifespan()
+   so every component below reads from one validated settings object instead
+   of calling os.environ directly.
+3. Model — MockModel by default; CloudModel when anthropic_api_key is set.
+4. Tool registry — register all built-in tools.
+5. Agent — wraps model + registry.
+6. Runtime — wraps model for single-turn chat; gets a ConversationMemory if
+   db_url is reachable, so /v1/chat persists per-session history.
+7. (Optional) DocumentLoader — only if DB + embedder URLs are configured.
 
 WHY LIFESPAN OVER on_event:
 FastAPI's @app.on_event("startup") is deprecated. The lifespan context
@@ -18,6 +22,15 @@ WHY MOCK MODEL DEFAULT:
 The server starts and serves traffic without any API key. This is critical
 for Docker Compose demos, CI smoke tests, and onboarding. Real AI calls
 are unlocked by setting ANTHROPIC_API_KEY.
+
+WHY core.lifecycle.lifespan() NOW:
+Previously this module built every component ad hoc, reading os.environ
+directly, with no shutdown handling beyond a log line. AthenaConfig +
+core.lifecycle.lifespan() were built (P0) specifically for this — a single
+validated settings object plus ordered, failure-tolerant component shutdown
+(every registered component's close()/aclose() is awaited in reverse order).
+This function now registers each component into that registry as it's built,
+so shutdown is no longer a no-op.
 """
 
 from __future__ import annotations
@@ -30,6 +43,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from athenai.agents.agent import Agent
+from athenai.core.config import AthenaConfig
+from athenai.core.lifecycle import lifespan as core_lifespan
 from athenai.gateway.routes import router
 from athenai.models.mock import MockModel
 from athenai.observability.logger import configure_logging, get_logger
@@ -41,14 +56,21 @@ from athenai.tools.registry import ToolRegistry
 _logger = get_logger(__name__)
 
 
-def _build_model() -> object:
+def _build_model(config: AthenaConfig) -> object:
     """Pick the model backend for this process.
 
-    Falls back to MockModel (not a raised error) if ANTHROPIC_API_KEY is set
-    but CloudModel construction fails — a bad key or missing dependency
-    should degrade the server to mock mode, not crash startup.
+    Falls back to MockModel (not a raised error) if config.anthropic_api_key
+    is set but CloudModel construction fails — a bad key or missing
+    dependency should degrade the server to mock mode, not crash startup.
+
+    model_name still comes from the raw ANTHROPIC_MODEL env var, not
+    AthenaConfig: config.model_registry models routing *roles* (fast/smart/
+    etc., for athenai.routing, which this module doesn't use), not "the
+    concrete Anthropic model id to construct CloudModel with" — forcing
+    that mapping would be inventing a meaning config.py's author didn't
+    give it.
     """
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    api_key = config.anthropic_api_key.strip()
     if api_key:
         try:
             from athenai.models.cloud import CloudModel
@@ -59,7 +81,7 @@ def _build_model() -> object:
         except Exception as exc:
             _logger.warning("model.fallback_to_mock", reason=str(exc))
     else:
-        _logger.info("model.init", backend="mock", reason="ANTHROPIC_API_KEY not set")
+        _logger.info("model.init", backend="mock", reason="anthropic_api_key not set")
     return MockModel()
 
 
@@ -67,6 +89,12 @@ def _build_tool_registry() -> ToolRegistry:
     """Register built-in tools. HTTPTool is only added if ATHENA_ALLOWED_DOMAINS
     is set, since an HTTP tool with no domain allowlist would let the agent
     fetch arbitrary URLs — safer to omit the tool than register it wide open.
+
+    Stays on the raw env var rather than config.allowed_http_domains: that
+    field expects a JSON-array env value under ATHENA_ALLOWED_HTTP_DOMAINS
+    (env_prefix + field name), not the comma-separated ATHENA_ALLOWED_DOMAINS
+    this module (and its deployment docs) have always used — switching would
+    silently stop parsing existing deployments' config.
     """
     registry = ToolRegistry()
     registry.register(CalculatorTool())
@@ -80,7 +108,28 @@ def _build_tool_registry() -> ToolRegistry:
     return registry
 
 
-async def _maybe_add_document_loader(app: FastAPI, model: object) -> None:
+async def _maybe_add_conversation_memory(config: AthenaConfig) -> object | None:
+    """Build a ConversationMemory if db_url is reachable, else return None.
+
+    Mirrors _maybe_add_document_loader's degrade-not-crash pattern: a down
+    Postgres at startup should not prevent /v1/chat from serving traffic in
+    mock mode, it should just mean chat is stateless (today's behavior)
+    rather than session-persistent.
+    """
+    try:
+        from athenai.memory.conversation import ConversationMemory
+
+        memory = await ConversationMemory.create(config.db_url)
+        _logger.info("memory.enabled", db_url=config.db_url)
+        return memory
+    except Exception as exc:
+        _logger.info("memory.disabled", reason=str(exc))
+        return None
+
+
+async def _maybe_add_document_loader(
+    app: FastAPI, config: AthenaConfig, registry: dict[str, object]
+) -> None:
     """Wire up the RAG document loader, or leave app.state.document_loader as
     None if unconfigured or unreachable.
 
@@ -90,7 +139,7 @@ async def _maybe_add_document_loader(app: FastAPI, model: object) -> None:
     gateway (chat, agents) from serving traffic. The /v1/documents/ingest
     route checks for this None and returns 503 rather than crashing.
     """
-    db_url = os.environ.get("ATHENA_DB_URL", "").strip()
+    db_url = config.db_url.strip()
     embedder_url = os.environ.get("ATHENA_EMBEDDER_URL", "").strip()
 
     if not db_url or not embedder_url:
@@ -117,6 +166,7 @@ async def _maybe_add_document_loader(app: FastAPI, model: object) -> None:
             retriever=retriever,
         )
         app.state.document_loader = loader
+        registry["rag_retriever"] = retriever
         _logger.info("rag.enabled", db_url=db_url)
     except Exception as exc:
         _logger.warning("rag.init_failed", reason=str(exc))
@@ -129,28 +179,41 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     model instance and shares it between `app.state.runtime` (single-turn
     chat) and `app.state.agent` (multi-step tool use) so both entry points
     hit the same backend and rate limits.
+
+    Wraps the whole body in core.lifecycle.lifespan(config): every component
+    with a close()/aclose() (today: ConversationMemory, and the asyncpg pool
+    underneath the RAG document loader) gets registered into it as it's
+    built, so shutdown actually tears them down in reverse order instead of
+    the previous no-op "log and exit".
     """
     configure_logging()
     _logger.info("athena.starting")
 
-    model = _build_model()
-    registry = _build_tool_registry()
+    config = AthenaConfig()
 
-    app.state.runtime = AthenaRuntime(
-        model=model,
-        max_concurrent=int(os.environ.get("ATHENA_MAX_CONCURRENT", "20")),
-    )
-    app.state.agent = Agent(
-        model=model,
-        tool_registry=registry,
-        max_iterations=int(os.environ.get("ATHENA_MAX_AGENT_ITER", "10")),
-    )
+    async with core_lifespan(config) as registry:
+        model = _build_model(config)
+        tool_registry = _build_tool_registry()
+        memory = await _maybe_add_conversation_memory(config)
+        if memory is not None:
+            registry["conversation_memory"] = memory
 
-    await _maybe_add_document_loader(app, model)
+        app.state.runtime = AthenaRuntime(
+            model=model,
+            max_concurrent=int(os.environ.get("ATHENA_MAX_CONCURRENT", "20")),
+            memory=memory,
+        )
+        app.state.agent = Agent(
+            model=model,
+            tool_registry=tool_registry,
+            max_iterations=int(os.environ.get("ATHENA_MAX_AGENT_ITER", "10")),
+        )
 
-    _logger.info("athena.ready")
-    yield
-    _logger.info("athena.shutdown")
+        await _maybe_add_document_loader(app, config, registry)
+
+        _logger.info("athena.ready")
+        yield
+        _logger.info("athena.shutdown")
 
 
 def create_app() -> FastAPI:

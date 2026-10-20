@@ -11,7 +11,12 @@ services:
       POSTGRES_PASSWORD: athena
       POSTGRES_DB: athena
     ports:
-      - "5432:5432"
+      # Host-side port only -- in-network callers (the api service) always
+      # reach this via postgres:5432 regardless. Mapped to 5433 on the host
+      # because 5432 is commonly already bound by a local Postgres install;
+      # this also happens to match tests/integration/conftest.py's default
+      # ATHENA_TEST_DB_DSN port.
+      - "5433:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./migrations/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
