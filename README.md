@@ -234,6 +234,7 @@ make down
 | `ATHENA_EMBEDDER_URL` | — | Embeddings API base URL |
 | `ATHENA_EMBEDDER_API_KEY` | — | API key for the embeddings endpoint above |
 | `ATHENA_ALLOWED_DOMAINS` | — | Comma-separated domains HTTPTool can reach |
+| `ATHENA_ALLOWED_TOOLS` | — | Comma-separated tool names the agent may use. Unset = all registered tools allowed |
 | `ATHENA_GATEWAY_API_KEY` | — | Requires `X-API-Key` on every `/v1/*` route when set. Unset = unauthenticated (local demo mode) |
 | `ATHENA_CORS_ALLOWED_ORIGINS` | — | Comma-separated origins allowed to call this API from a browser. Unset = no cross-origin requests at all |
 | `ATHENA_MAX_CONCURRENT` | `20` | Semaphore cap on concurrent model calls |

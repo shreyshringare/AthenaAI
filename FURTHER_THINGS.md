@@ -50,16 +50,29 @@ real gateway with a fake embedder URL + key, confirmed `rag.enabled` fires
 *network* error against the fake URL, not a construction-time crash.
 Regression tests in `tests/unit/test_gateway_app.py`.
 
-## 3. Permission / `allowed_tools` model
+## 3. Permission / `allowed_tools` model — DONE (2026-10-20)
 
-`ToolValidator.validate_permission()` exists and is unit-tested, but nothing
-in the system tracks per-user tool permissions — no schema field, no config,
-no storage. Needs designing from scratch:
-- Where does `allowed_tools` come from per request? (static config? per-user
-  DB row? request field?)
-- Plumbing from `gateway/routes.py` → `Agent.run()` → `AgentExecutor` →
-  `_execute_tool()`.
-- Decide default behavior when unset (allow all vs. deny all).
+`AgentExecutor` now accepts an `allowed_tools: set[str] | None` at
+construction, checked via `ToolValidator.validate_permission()` right after
+schema validation and before `tool.execute()`. Wired from
+`ATHENA_ALLOWED_TOOLS` (comma-separated) in `gateway/app.py` →
+`Agent(allowed_tools=...)`. `None` (unset) means unrestricted — matches
+every other optional security feature in this gateway degrading to
+permissive, not a silent lockout.
+
+**Deliberately not per-user**: there's no multi-tenant identity system in
+this gateway, just one shared `ATHENA_GATEWAY_API_KEY` — so `allowed_tools`
+is a single gateway-wide set, and `user_id` is only used in the permission
+error's audit-trail message, not to differentiate access. Revisit once real
+per-user accounts exist (`user_id` would need to come from verified identity,
+not a client-supplied free-form string in the request body as it does today).
+
+Tested: `tests/unit/test_agent.py` (`test_executor_denies_tool_not_in_allowed_tools`,
+`test_executor_allows_tool_in_allowed_tools`,
+`test_executor_allows_all_tools_when_allowed_tools_unset`). Verified live:
+booted the real gateway with `ATHENA_ALLOWED_TOOLS` set, confirmed
+`tool_permissions.enabled` logs the configured set and the agent still runs
+end to end.
 
 ## 4. `CloudModel` tool-call parsing
 

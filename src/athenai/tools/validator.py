@@ -3,11 +3,11 @@
 HOW IT FITS IN THE SYSTEM:
 AgentExecutor._execute_tool (athenai.agents.executor) calls validate_schema()
 on every tool call before tool.execute(), catching missing/mistyped
-arguments up front. validate_permission() (and therefore the combined
-validate()) is not wired into the executor — there is no allowed_tools
-concept plumbed through the agent loop yet, so a caller that needs
-per-user permission checks should call validate_permission() itself
-before invoking the executor.
+arguments up front, then validate_permission() when the executor was
+constructed with an allowed_tools set (via athenai.gateway.app's
+ATHENA_ALLOWED_TOOLS). allowed_tools is a single gateway-wide set, not a
+per-user lookup — see AgentExecutor's class docstring for why (no
+multi-tenant identity system exists yet, just one shared gateway API key).
 
 WHY SCHEMA BEFORE PERMISSION:
 Schema validation is a pure in-process dict traversal — zero I/O. Permission

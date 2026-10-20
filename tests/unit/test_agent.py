@@ -189,6 +189,128 @@ async def test_executor_rejects_invalid_arguments_before_execute():
 
 
 @pytest.mark.asyncio
+async def test_executor_denies_tool_not_in_allowed_tools():
+    """When allowed_tools is configured, a tool call outside it is rejected
+    before execute() -- surfaced as a captured error, not a crash."""
+
+    class OneCallModel:
+        name = "once"
+        _calls = 0
+
+        async def generate(self, request):
+            from athenai.models.base import ModelResponse
+
+            self.__class__._calls += 1
+            if self.__class__._calls == 1:
+                return ModelResponse(
+                    content='TOOL_CALL: {"name": "calculator", "arguments": {"expression": "1+1"}}',
+                    model_name=self.name,
+                    input_tokens=5,
+                    output_tokens=5,
+                )
+            return ModelResponse(
+                content="Recovered.",
+                model_name=self.name,
+                input_tokens=5,
+                output_tokens=5,
+            )
+
+        async def health_check(self):
+            return True
+
+    registry = ToolRegistry()
+    registry.register(CalculatorTool())
+
+    executor = AgentExecutor(
+        model=OneCallModel(), tool_registry=registry, allowed_tools={"some_other_tool"}
+    )
+    result = await executor.run("Compute something", user_id="alice")
+
+    denied_step = result.steps[0]
+    assert len(denied_step.tool_results) == 1
+    assert "does not have permission" in denied_step.tool_results[0]["error"]
+    assert "alice" in denied_step.tool_results[0]["error"]
+    assert result.status == AgentStatus.COMPLETED
+
+
+@pytest.mark.asyncio
+async def test_executor_allows_tool_in_allowed_tools():
+    class OneCallModel:
+        name = "once"
+        _calls = 0
+
+        async def generate(self, request):
+            from athenai.models.base import ModelResponse
+
+            self.__class__._calls += 1
+            if self.__class__._calls == 1:
+                return ModelResponse(
+                    content='TOOL_CALL: {"name": "calculator", "arguments": {"expression": "1+1"}}',
+                    model_name=self.name,
+                    input_tokens=5,
+                    output_tokens=5,
+                )
+            return ModelResponse(
+                content="Done.",
+                model_name=self.name,
+                input_tokens=5,
+                output_tokens=5,
+            )
+
+        async def health_check(self):
+            return True
+
+    registry = ToolRegistry()
+    registry.register(CalculatorTool())
+
+    executor = AgentExecutor(
+        model=OneCallModel(), tool_registry=registry, allowed_tools={"calculator"}
+    )
+    result = await executor.run("Compute something")
+
+    allowed_step = result.steps[0]
+    assert len(allowed_step.tool_results) == 1
+    assert allowed_step.tool_results[0].get("result") == 2
+
+
+@pytest.mark.asyncio
+async def test_executor_allows_all_tools_when_allowed_tools_unset():
+    """Default behavior (allowed_tools=None) must stay exactly as before --
+    no permission restriction unless explicitly configured."""
+    registry = ToolRegistry()
+    registry.register(CalculatorTool())
+
+    class ToolCallingModel:
+        name = "fake-tool-caller"
+
+        async def generate(self, request):
+            from athenai.models.base import ModelResponse
+
+            if len(request.messages) == 1:
+                return ModelResponse(
+                    content='TOOL_CALL: {"name": "calculator", "arguments": {"expression": "3*3"}}',
+                    model_name=self.name,
+                    input_tokens=10,
+                    output_tokens=10,
+                )
+            return ModelResponse(
+                content="The answer is 9.",
+                model_name=self.name,
+                input_tokens=10,
+                output_tokens=5,
+            )
+
+        async def health_check(self):
+            return True
+
+    executor = AgentExecutor(model=ToolCallingModel(), tool_registry=registry)
+    result = await executor.run("What is 3 * 3?")
+
+    assert result.status == AgentStatus.COMPLETED
+    assert result.steps[0].tool_results[0].get("result") == 9
+
+
+@pytest.mark.asyncio
 async def test_executor_handles_tool_error_gracefully():
     class ErrorTool:
         name = "error_tool"

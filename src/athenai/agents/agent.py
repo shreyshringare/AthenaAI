@@ -32,11 +32,13 @@ class Agent:
         model: Any,
         tool_registry: ToolRegistry | None = None,
         max_iterations: int = 10,
+        allowed_tools: set[str] | None = None,
     ) -> None:
         self._executor = AgentExecutor(
             model=model,
             tool_registry=tool_registry or ToolRegistry(),
             max_iterations=max_iterations,
+            allowed_tools=allowed_tools,
         )
 
     async def run(self, task: str, user_id: str = "default") -> AgentResult:

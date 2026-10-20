@@ -109,6 +109,22 @@ def _build_tool_registry() -> ToolRegistry:
     return registry
 
 
+def _build_allowed_tools() -> set[str] | None:
+    """Parse ATHENA_ALLOWED_TOOLS (comma-separated, same convention as
+    ATHENA_ALLOWED_DOMAINS/ATHENA_CORS_ALLOWED_ORIGINS) into the set
+    AgentExecutor checks tool calls against.
+
+    Returns None (not an empty set) when unset — AgentExecutor treats None
+    as "no restriction configured" and skips the permission check entirely,
+    vs. an empty set which would deny every tool. Unset must mean today's
+    unrestricted behavior, not a silent lockout.
+    """
+    raw = os.environ.get("ATHENA_ALLOWED_TOOLS", "").strip()
+    if not raw:
+        return None
+    return {t.strip() for t in raw.split(",") if t.strip()}
+
+
 async def _maybe_add_conversation_memory(config: AthenaConfig) -> object | None:
     """Build a ConversationMemory if db_url is reachable, else return None.
 
@@ -227,10 +243,20 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             max_concurrent=int(os.environ.get("ATHENA_MAX_CONCURRENT", "20")),
             memory=memory,
         )
+        allowed_tools = _build_allowed_tools()
+        if allowed_tools is None:
+            _logger.warning(
+                "tool_permissions.disabled",
+                reason="ATHENA_ALLOWED_TOOLS not set -- agent may use any registered tool",
+            )
+        else:
+            _logger.info("tool_permissions.enabled", allowed_tools=sorted(allowed_tools))
+
         app.state.agent = Agent(
             model=model,
             tool_registry=tool_registry,
             max_iterations=int(os.environ.get("ATHENA_MAX_AGENT_ITER", "10")),
+            allowed_tools=allowed_tools,
         )
 
         await _maybe_add_document_loader(app, config, registry)

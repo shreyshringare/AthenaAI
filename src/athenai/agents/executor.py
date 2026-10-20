@@ -7,8 +7,18 @@ Pulls tool contracts from a ToolRegistry (athenai.tools.registry) to build
 its system prompt, calls model.generate() (athenai.models.base.ModelRequest)
 each iteration, and dispatches tool calls back through the same registry —
 each call is schema-validated via ToolValidator (athenai.tools.validator)
-before tool.execute() runs. Yields AgentResult/AgentStep/AgentStatus
-(state.py) as its trace.
+before tool.execute() runs, and permission-checked against `allowed_tools`
+when one is configured. Yields AgentResult/AgentStep/AgentStatus (state.py)
+as its trace.
+
+WHY allowed_tools IS A SINGLE SET, NOT A PER-USER LOOKUP:
+There's no multi-tenant identity system in this gateway today — just one
+shared ATHENA_GATEWAY_API_KEY (see athenai.gateway.auth). `user_id` is a
+free-form string the caller supplies, used here only for the error
+message's audit trail, not to differentiate permissions per caller. A real
+per-user permission store is future work once real user accounts exist;
+this is the honest shape for what the system can actually authenticate
+today.
 
 HOW THE LOOP WORKS:
 1. Build a system prompt that lists all registered tools.
@@ -59,17 +69,20 @@ class AgentExecutor:
         model: Any,
         tool_registry: ToolRegistry,
         max_iterations: int = _MAX_ITERATIONS,
+        allowed_tools: set[str] | None = None,
     ) -> None:
         self._model = model
         self._registry = tool_registry
         self._max_iterations = max_iterations
         self._validator = ToolValidator()
+        self._allowed_tools = allowed_tools
 
     async def run(self, task: str, user_id: str = "default") -> AgentResult:
         """Run the model-tool loop to completion for a single task.
 
-        user_id is accepted for future per-user context/memory scoping but
-        is not currently used inside the loop.
+        user_id is forwarded to _execute_tool for the permission check's
+        audit trail when allowed_tools is configured (see class docstring
+        for why that's not a per-user lookup).
 
         Normal exit: the model responds with no tool calls, which is taken
         as the final answer (status COMPLETED).
@@ -121,7 +134,7 @@ class AgentExecutor:
             status = transition(status, AgentStatus.AWAITING_TOOL)
 
             results = await asyncio.gather(
-                *[self._execute_tool(tc) for tc in tool_calls],
+                *[self._execute_tool(tc, user_id) for tc in tool_calls],
                 return_exceptions=True,
             )
 
@@ -180,19 +193,27 @@ class AgentExecutor:
                 pass
         return calls
 
-    async def _execute_tool(self, tool_call: dict[str, Any]) -> Any:
-        """Look up, schema-validate, then execute a single tool call.
+    async def _execute_tool(self, tool_call: dict[str, Any], user_id: str) -> Any:
+        """Look up, schema-validate, permission-check, then execute a single
+        tool call.
 
-        Only validate_schema() runs here, not the full validate() (which also
-        checks per-user permissions) — there's no allowed_tools concept
-        plumbed through the agent loop yet, so a permission check here would
-        have nothing real to check against. Schema validation alone still
-        catches the common failure mode (missing/mistyped arguments) before
-        it reaches tool.execute(), and raises the same ToolDeniedError the
-        caller already handles via asyncio.gather(return_exceptions=True).
+        Schema runs before permission (matches ToolValidator.validate()'s
+        own documented order): it's a pure in-process check, so failing
+        fast on a malformed call gives a clearer error than "permission
+        denied for a call that would have failed anyway" -- even though
+        the permission check here is also in-process (no I/O), keeping
+        the same order avoids two different orderings to reason about.
+
+        Permission is only checked when allowed_tools was configured at
+        construction time -- None means unrestricted (today's default,
+        unchanged), matching every other optional security feature in
+        this gateway (auth, RAG, HTTPTool's domain allowlist) degrading to
+        permissive rather than crashing when unconfigured.
         """
         tool = self._registry.get(tool_call["name"])
         self._validator.validate_schema(tool, tool_call["arguments"])
+        if self._allowed_tools is not None:
+            self._validator.validate_permission(tool, user_id, self._allowed_tools)
         return await tool.execute(tool_call["arguments"])
 
     def _build_system_prompt(self) -> str:
