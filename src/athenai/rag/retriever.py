@@ -3,10 +3,10 @@
 HOW IT FITS IN THE SYSTEM:
 Final stage of the ingest pipeline (see athenai/rag/__init__.py) — receives
 Chunk objects and their embeddings from DocumentLoader.ingest() and persists
-them. It also owns the query-side entry point (search()), which a future
-retrieval endpoint would call with a query embedding; CosineReranker.rerank()
-is meant to post-process its results, though no gateway route wires that path
-yet.
+them. It also owns the query-side entry point (search()), called by
+DocumentLoader.search() with a query embedding; CosineReranker.rerank()
+post-processes its results there before the /v1/documents/search route
+returns them.
 
 WHY THE EMBEDDING COLUMN IS A FIXED vector(1536):
 pgvector requires a fixed dimensionality per column. 1536 matches

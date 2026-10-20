@@ -9,6 +9,7 @@ Route layout:
   POST /v1/chat/stream      — single-turn chat, Server-Sent Events stream
   POST /v1/agents/run       — multi-step agent with tool use
   POST /v1/documents/ingest — RAG document ingest
+  POST /v1/documents/search — RAG query: embed + retrieve + rerank
 
 HOW IT FITS IN THE SYSTEM:
 This module defines the `router` that app.py mounts onto the FastAPI app.
@@ -37,8 +38,11 @@ from athenai.gateway.schemas import (
     ChatResponse,
     DocumentIngestRequest,
     DocumentIngestResponse,
+    DocumentSearchRequest,
+    DocumentSearchResponse,
     HealthResponse,
     ReadyResponse,
+    RetrievedChunkSchema,
     UsageStats,
 )
 
@@ -212,3 +216,42 @@ async def document_ingest(
     )
 
     return DocumentIngestResponse(document_id=body.document_id, chunks_stored=chunks)
+
+
+@router.post("/v1/documents/search", response_model=DocumentSearchResponse)
+async def document_search(
+    body: DocumentSearchRequest, request: Request
+) -> DocumentSearchResponse:
+    """Embed the query, retrieve nearest chunks, rerank, return top_k.
+
+    Returns 503 (not 500) when the RAG subsystem was never configured --
+    same reasoning and same app.state.document_loader check as
+    document_ingest above.
+    """
+    loader = getattr(request.app.state, "document_loader", None)
+    if loader is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Document loader not configured. Set ATHENA_DB_URL and ATHENA_EMBEDDER_URL.",
+        )
+
+    results = await loader.search(
+        query=body.query,
+        top_k=body.top_k,
+        metadata_filter=body.metadata_filter or None,
+    )
+
+    return DocumentSearchResponse(
+        query=body.query,
+        results=[
+            RetrievedChunkSchema(
+                chunk_id=r.chunk_id,
+                document_id=r.document_id,
+                content=r.content,
+                chunk_index=r.chunk_index,
+                score=r.score,
+                metadata=r.metadata,
+            )
+            for r in results
+        ],
+    )

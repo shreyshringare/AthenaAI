@@ -15,8 +15,8 @@ separate query-side path:
                  -> reranker.CosineReranker      (re-order candidates)
 
 `athenai.gateway.app` wires a `DocumentLoader` into `app.state.document_loader`
-when `ATHENA_DB_URL` and `ATHENA_EMBEDDER_URL` are both set; the
-`/v1/documents/ingest` route in `athenai.gateway.routes` is the only current
-caller of this pipeline. The query-side path (retriever.search + reranker) is
-implemented but not yet exposed as a gateway route.
+when `ATHENA_DB_URL` and `ATHENA_EMBEDDER_URL` are both set. `athenai.gateway.routes`
+calls `DocumentLoader.ingest()` for `/v1/documents/ingest` and
+`DocumentLoader.search()` (which wraps retriever.search() + reranker.rerank())
+for `/v1/documents/search`.
 """

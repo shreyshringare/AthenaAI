@@ -27,16 +27,30 @@ We chose Option B instead for now: `ConversationMemory` wired directly into
 entirely. Revisit this once the RAG query route exists and there's a second
 real consumer that justifies the shared pipeline.
 
-## 2. RAG query-side gateway route
+## 2. RAG query-side gateway route — DONE (2026-10-20)
 
-`PgVectorRetriever.search()` + `CosineReranker` work standalone (P6 gate,
-tested) but no HTTP endpoint exposes them — only `/v1/documents/ingest`
-is wired. Needs:
-- New route, e.g. `POST /v1/documents/search` in `gateway/routes.py`.
-- Request/response schemas in `gateway/schemas.py` (query text, top_k,
-  returned chunks + scores).
-- Decide embedding path for the query text itself (reuse `CloudEmbedder`
-  already built for ingest).
+`POST /v1/documents/search` now exists (`gateway/routes.py`), backed by
+`DocumentLoader.search()` (`rag/loader.py`), which embeds the query, calls
+`PgVectorRetriever.search()` for 2x `top_k` candidates, and reranks via
+`CosineReranker` down to `top_k`. Tested: `tests/integration/test_rag_pipeline.py`
+(`test_loader_search_returns_relevant_chunk`, `test_loader_search_respects_top_k`)
+against real Postgres, plus `tests/unit/test_gateway.py` for the route's
+503-when-unconfigured and happy-path-with-a-stub-loader cases.
+
+### Newly found while building this: CloudEmbedder is never actually
+constructible through the live gateway
+
+`gateway/app.py`'s `_maybe_add_document_loader` calls
+`CloudEmbedder(base_url=embedder_url)` — but `CloudEmbedder.__init__`
+requires `api_key` with no default. No env var for it is read anywhere in
+`app.py`. So the whole RAG subsystem (ingest *and* the new search route)
+silently degrades to disabled (caught by the broad `except Exception` there)
+the moment someone actually sets `ATHENA_EMBEDDER_URL` without also somehow
+supplying a key — which nothing in the code makes possible today. Not fixed
+here: needs a new env var (`ATHENA_EMBEDDER_API_KEY`?) and is an ingest-side
+construction bug, not part of the query-route scope. Verified the route and
+`DocumentLoader.search()` logic directly against `MockEmbedder` instead,
+which is the correct level of testing for CI anyway (no real paid API call).
 
 ## 3. Permission / `allowed_tools` model
 

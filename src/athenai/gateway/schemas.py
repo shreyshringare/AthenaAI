@@ -96,6 +96,26 @@ class DocumentIngestResponse(BaseModel):
     chunks_stored: int
 
 
+class DocumentSearchRequest(BaseModel):
+    query: str
+    top_k: int = Field(default=5, ge=1, le=50)
+    metadata_filter: dict[str, Any] = Field(default_factory=dict)
+
+
+class RetrievedChunkSchema(BaseModel):
+    chunk_id: str
+    document_id: str
+    content: str
+    chunk_index: int
+    score: float
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class DocumentSearchResponse(BaseModel):
+    query: str
+    results: list[RetrievedChunkSchema]
+
+
 class HealthResponse(BaseModel):
     status: str
     version: str = "1.0.0"

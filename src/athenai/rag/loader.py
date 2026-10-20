@@ -1,14 +1,15 @@
 """DocumentLoader — idempotent ingest pipeline: parse → chunk → embed → store.
+Also the query-side entry point: embed → retrieve → rerank.
 
 HOW IT FITS IN THE SYSTEM:
-This is the orchestrator for the ingest half of the RAG pipeline (see
+This is the orchestrator for both halves of the RAG pipeline (see
 athenai/rag/__init__.py for the full pipeline map). It is constructed once in
 athenai.gateway.app._maybe_add_document_loader and stored on
-app.state.document_loader; the /v1/documents/ingest route in
-athenai.gateway.routes calls .ingest() on it per request. It depends on, but
-does not implement, each pipeline stage — parser, chunker, embedder, and
-retriever are injected so tests can substitute MockEmbedder or an in-memory
-retriever without touching this class.
+app.state.document_loader. athenai.gateway.routes calls .ingest() for
+/v1/documents/ingest and .search() for /v1/documents/search. It depends on,
+but does not implement, each pipeline stage — parser, chunker, embedder,
+retriever, and reranker are injected so tests can substitute MockEmbedder or
+an in-memory retriever without touching this class.
 """
 
 from __future__ import annotations
@@ -18,13 +19,14 @@ from typing import Any
 from athenai.rag.chunker import SlidingWindowChunker
 from athenai.rag.embedder import CloudEmbedder, MockEmbedder
 from athenai.rag.parser import DocumentParser
-from athenai.rag.retriever import PgVectorRetriever
+from athenai.rag.reranker import CosineReranker
+from athenai.rag.retriever import PgVectorRetriever, RetrievedChunk
 
 _AnyEmbedder = CloudEmbedder | MockEmbedder
 
 
 class DocumentLoader:
-    """Orchestrates the full ingest pipeline.
+    """Orchestrates the full ingest pipeline, plus query-side search.
 
     WHY IDEMPOTENT ON document_id:
     Re-ingesting the same document would duplicate chunks in the vector store,
@@ -38,11 +40,13 @@ class DocumentLoader:
         chunker: SlidingWindowChunker,
         embedder: _AnyEmbedder,
         retriever: PgVectorRetriever,
+        reranker: CosineReranker | None = None,
     ) -> None:
         self._parser = parser
         self._chunker = chunker
         self._embedder = embedder
         self._retriever = retriever
+        self._reranker = reranker or CosineReranker()
 
     async def ingest(
         self,
@@ -76,3 +80,22 @@ class DocumentLoader:
         """Force re-ingest: delete existing chunks then ingest fresh."""
         await self._retriever.delete_document(document_id)
         return await self.ingest(content, document_id, source=source, metadata=metadata)
+
+    async def search(
+        self,
+        query: str,
+        top_k: int = 5,
+        metadata_filter: dict[str, Any] | None = None,
+    ) -> list[RetrievedChunk]:
+        """Embed `query` and return the top_k most relevant stored chunks.
+
+        Retrieves 2x top_k candidates from the ANN search before reranking
+        and truncating to top_k -- reranking a set already cut down to
+        top_k can only reorder those same items, not surface a better one
+        the initial ANN pass ranked just outside the cutoff.
+        """
+        [embedding] = await self._embedder.embed([query])
+        candidates = await self._retriever.search(
+            embedding, k=top_k * 2, metadata_filter=metadata_filter
+        )
+        return self._reranker.rerank(embedding, candidates, top_k=top_k)

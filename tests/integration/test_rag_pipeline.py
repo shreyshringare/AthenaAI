@@ -116,6 +116,38 @@ async def test_delete_document(loader: DocumentLoader, retriever: PgVectorRetrie
 
 
 @pytest.mark.asyncio
+async def test_loader_search_returns_relevant_chunk(
+    loader: DocumentLoader, retriever: PgVectorRetriever
+) -> None:
+    """DocumentLoader.search() is the query-side path the gateway's
+    /v1/documents/search route calls -- embeds the query itself (unlike
+    retriever.search(), which takes a pre-computed embedding) and reranks
+    before returning."""
+    docs = {
+        "doc-a": "Neural networks are computational models inspired by the brain.",
+        "doc-b": "SQL databases store data in relational tables with rows and columns.",
+    }
+    for doc_id, content in docs.items():
+        await loader.ingest(content, document_id=doc_id)
+
+    results = await loader.search("neural network brain model", top_k=1)
+
+    assert len(results) == 1
+    assert results[0].document_id == "doc-a"
+
+
+@pytest.mark.asyncio
+async def test_loader_search_respects_top_k(
+    loader: DocumentLoader, retriever: PgVectorRetriever
+) -> None:
+    for i in range(5):
+        await loader.ingest(f"Document about topic {i} " * 10, document_id=f"search-doc-{i}")
+
+    results = await loader.search("topic", top_k=2)
+    assert len(results) == 2
+
+
+@pytest.mark.asyncio
 async def test_reranker_sorts_by_score(retriever: PgVectorRetriever) -> None:
     loader = DocumentLoader(
         parser=DocumentParser(),

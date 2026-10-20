@@ -34,6 +34,7 @@ async def client():
     async with AsyncClient(
         transport=ASGITransport(app=app), base_url="http://test"
     ) as ac:
+        ac.app = app  # exposes app.state for tests that need to mutate it
         yield ac
 
 
@@ -133,6 +134,44 @@ async def test_document_ingest_returns_503_when_loader_not_configured(client):
         json={"content": "hello", "document_id": "doc1"},
     )
     assert response.status_code == 503
+
+
+@pytest.mark.asyncio
+async def test_document_search_returns_503_when_loader_not_configured(client):
+    response = await client.post(
+        "/v1/documents/search",
+        json={"query": "hello"},
+    )
+    assert response.status_code == 503
+
+
+@pytest.mark.asyncio
+async def test_document_search_returns_results_from_loader(client):
+    from athenai.rag.retriever import RetrievedChunk
+
+    class _StubLoader:
+        async def search(self, query, top_k=5, metadata_filter=None):
+            return [
+                RetrievedChunk(
+                    chunk_id="c1",
+                    document_id="doc1",
+                    content="relevant content",
+                    chunk_index=0,
+                    score=0.9,
+                )
+            ][:top_k]
+
+    client.app.state.document_loader = _StubLoader()
+
+    response = await client.post(
+        "/v1/documents/search",
+        json={"query": "hello", "top_k": 1},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["query"] == "hello"
+    assert len(data["results"]) == 1
+    assert data["results"][0]["document_id"] == "doc1"
 
 
 @pytest.mark.asyncio

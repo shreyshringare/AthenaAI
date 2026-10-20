@@ -1,12 +1,11 @@
 """Reranker — cosine similarity re-ordering of retrieved chunks.
 
 HOW IT FITS IN THE SYSTEM:
-Optional last step of the query-side RAG path, downstream of
-PgVectorRetriever.search() (see athenai/rag/__init__.py). Not currently
-invoked by any gateway route — no query/search endpoint exists yet, only
-/v1/documents/ingest for the write side. Intended for a future retrieval
-endpoint that wants to combine or re-score candidates beyond what pgvector's
-ANN index alone returns.
+Last step of the query-side RAG path, downstream of
+PgVectorRetriever.search() (see athenai/rag/__init__.py). Called by
+athenai.rag.loader.DocumentLoader.search(), which the /v1/documents/search
+gateway route uses — DocumentLoader constructs a default instance if none
+is injected.
 """
 
 from __future__ import annotations
