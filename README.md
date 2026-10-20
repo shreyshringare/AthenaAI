@@ -235,6 +235,7 @@ make down
 | `ATHENA_EMBEDDER_API_KEY` | — | API key for the embeddings endpoint above |
 | `ATHENA_REDIS_URL` | `redis://localhost:6379/0` | Embedding cache backend. Unreachable = falls back to an in-process cache |
 | `ATHENA_RESPONSE_CACHE_TTL_S` | `300` | TTL for cached embeddings (seconds) |
+| `ATHENA_TOKEN_BUDGET` | — | JSON override of the context-assembly token budget used by `/v1/chat*` (e.g. `'{"total": 20000}'`). Only the `total` key currently has any effect — see `context/budget.py` |
 | `ATHENA_ALLOWED_DOMAINS` | — | Comma-separated domains HTTPTool can reach |
 | `ATHENA_ALLOWED_TOOLS` | — | Comma-separated tool names the agent may use. Unset = all registered tools allowed |
 | `ATHENA_GATEWAY_API_KEY` | — | Requires `X-API-Key` on every `/v1/*` route when set. Unset = unauthenticated (local demo mode) |

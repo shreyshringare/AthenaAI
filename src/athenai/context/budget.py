@@ -2,12 +2,18 @@
 Per-bucket token accounting for context assembly, with a hard overflow ceiling.
 
 HOW IT FITS IN THE SYSTEM:
-ContextEngine (engine.py) owns one TokenBudgetManager per request and calls
-allocate() as it decides how many tokens each source (system prompt,
-conversation, memory, RAG, tool results) is permitted to consume. It is pure
-bookkeeping — it does not fetch or truncate content itself; callers who hit
-ContextOverflowError are expected to decide what to drop (that decision is
-made one layer up, in ContextPacker).
+ContextEngine (engine.py) owns one TokenBudgetManager per request, but as
+of this writing only ever reads its `total_budget` property — allocate()
+and the per-bucket `_allocations` dict it enforces are not actually called
+anywhere in the live path. ContextPacker.pack() takes a single flat
+token_ceiling (= total_budget) and drops items in priority order once that
+one combined total is exceeded; it never checks individual bucket limits.
+Practically: a "token_budget" config dict's per-bucket numbers (system,
+conversation, memory, rag, tools) are currently decorative — only the
+"total" key (or the sum of all values if "total" is absent) has any
+effect. allocate()/ContextOverflowError are real, tested (P4 gate), and
+usable by a caller that wants per-bucket enforcement directly — just not
+exercised by ContextEngine today.
 
 WHY HARD TOKEN CEILING:
 Silent truncation is a worse failure mode than a loud error. If context silently

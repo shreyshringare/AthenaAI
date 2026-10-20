@@ -8,13 +8,19 @@ COMPONENT INIT ORDER (lifespan):
    of calling os.environ directly.
 3. Model — MockModel by default; CloudModel when anthropic_api_key is set.
 4. Tool registry — register all built-in tools.
-5. Agent — wraps model + registry.
+5. DocumentLoader — only if DB URL, embedder URL, and embedder API key are
+   all configured. Built before Runtime (next) so Runtime can be handed
+   app.state.document_loader directly. Its embedder is wrapped in a
+   CachingEmbedder backed by Redis (if reachable) or an in-process
+   fallback — see _build_embedding_cache.
 6. Runtime — wraps model for single-turn chat; gets a ConversationMemory if
-   db_url is reachable, so /v1/chat persists per-session history.
-7. (Optional) DocumentLoader — only if DB URL, embedder URL, and embedder
-   API key are all configured. Its embedder is wrapped in a CachingEmbedder
-   backed by Redis (if reachable) or an in-process fallback — see
-   _build_embedding_cache.
+   db_url is reachable (per-session history) and a ContextEngine (built
+   from config.token_budget) so /v1/chat* turns are token-budgeted and
+   RAG-augmented via the DocumentLoader from step 5, instead of a plain
+   history prepend.
+7. Agent — wraps model + registry (does not go through ContextEngine —
+   see athenai.agents.executor's own docstring for why its message shape
+   is handled separately).
 
 WHY LIFESPAN OVER on_event:
 FastAPI's @app.on_event("startup") is deprecated. The lifespan context
@@ -46,6 +52,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from athenai.agents.agent import Agent
+from athenai.context.budget import TokenBudgetManager
+from athenai.context.engine import ContextEngine
 from athenai.core.config import AthenaConfig
 from athenai.core.lifecycle import lifespan as core_lifespan
 from athenai.gateway.routes import router
@@ -281,10 +289,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         if memory is not None:
             registry["conversation_memory"] = memory
 
+        # Built before AthenaRuntime so the runtime can be handed
+        # app.state.document_loader directly for its RAG-augmented path.
+        await _maybe_add_document_loader(app, config, registry)
+
+        context_engine = ContextEngine(TokenBudgetManager(config.token_budget))
         app.state.runtime = AthenaRuntime(
             model=model,
             max_concurrent=int(os.environ.get("ATHENA_MAX_CONCURRENT", "20")),
             memory=memory,
+            context_engine=context_engine,
+            document_loader=app.state.document_loader,
         )
         allowed_tools = _build_allowed_tools()
         if allowed_tools is None:
@@ -301,8 +316,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             max_iterations=int(os.environ.get("ATHENA_MAX_AGENT_ITER", "10")),
             allowed_tools=allowed_tools,
         )
-
-        await _maybe_add_document_loader(app, config, registry)
 
         _logger.info("athena.ready")
         yield

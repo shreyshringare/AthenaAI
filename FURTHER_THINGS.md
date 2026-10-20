@@ -6,26 +6,68 @@ doesn't exist yet, so each is a real feature to design and build, not a
 connection to make. Deliberately deferred out of the wiring pass so that work
 stayed reviewable and low-risk.
 
-## 1. Full `ContextEngine` integration (Option A, deferred)
+## 1. Full `ContextEngine` integration — DONE for `AthenaRuntime` only (2026-10-20)
 
-Insert `ContextEngine.build()` into `AgentExecutor` (and `AthenaRuntime`) so
-every agent/chat turn goes through `memory_fn` + `rag_fn` + `RelevanceRanker`
-+ token-budget packing — the architecture the `context/` package's own
-docstrings describe as intended, but which has no live caller today.
+`/v1/chat` and `/v1/chat/stream` now route through `ContextEngine.build()`:
+`ConversationMemory` history + RAG (via `DocumentLoader.search()`, which
+itself does embed → retrieve → `CosineReranker`) + the current turn, all
+token-budgeted by `ContextPacker`, dropping RAG first then memory under
+pressure (system > conversation > memory > rag, per `ContextPacker`'s own
+priority order).
 
-**Why deferred:** biggest blast radius of anything on this list. Requires:
-- A serialization scheme between `ContextEngine`'s `list[str]` content model
-  and `AgentExecutor`'s `list[dict[str, str]]` message history — doesn't
-  exist, has to be designed.
-- Every `/v1/chat` and `/v1/agents/run` call gaining a hard Postgres
-  dependency (today only `/v1/documents/ingest` needs it).
-- The RAG query route (#2 below) also being live, since `RelevanceRanker`
-  has nothing to rank without it.
+**What this needed, that "just wire it" undersold:**
+- A `\x00`-delimited role-encoding scheme (`_encode_role_content`/
+  `_decode_role_content` in `runtime/pipeline.py`) — `ContextEngine`'s
+  buckets are plain `list[str]`, no side-channel for role, so reusing
+  `ConversationMemory`'s own `"{role}: {content}"` text format would have
+  been ambiguous once `ContextPacker` flattens everything to bare strings
+  (no way to tell "a message that starts with the text 'user: '" apart
+  from "a message whose role is user").
+- A chronological reassembly step: `ContextPacker` groups by bucket in
+  *priority* order (conversation > memory, since conversation is dropped
+  last) — which puts the *current* turn before *older history* if you
+  trust `packed.items`'s sequence directly. Reordering to memory-then-
+  conversation at reconstruction time was necessary; priority order and
+  presentation order are different concerns `ContextEngine` doesn't
+  separate.
+- Folding `system` + `rag` buckets into `ModelRequest.system` rather than
+  message-list entries, since retrieved document chunks aren't "turns."
 
-We chose Option B instead for now: `ConversationMemory` wired directly into
-`AthenaRuntime`, bypassing `ContextEngine`/`budget`/`packing`/`ranking`
-entirely. Revisit this once the RAG query route exists and there's a second
-real consumer that justifies the shared pipeline.
+**Found in the process:** `TokenBudgetManager.allocate()` and its
+per-bucket `_allocations` enforcement are never actually called by
+`ContextEngine` — only `.total_budget` (a single flat ceiling) is read.
+A `token_budget` config dict's per-bucket numbers (system/conversation/
+memory/rag/tools) are currently decorative; only `"total"` has any
+effect. Documented in `context/budget.py`, not fixed (real feature, bigger
+than this task, and the single-ceiling behavior is itself defensible —
+just not what the per-bucket-looking config implies).
+
+**Deliberately NOT done: `AgentExecutor` (the tool-use loop).** Scoped to
+`AthenaRuntime` only — `AgentExecutor`'s message shape is structurally
+different (tool-call protocol instructions baked into the system prompt,
+tool results injected mid-loop, not at turn start), and doing both at once
+would double the risk for one pass. Revisit as its own scoped task.
+
+**Also deliberately NOT wired: `RelevanceRanker`.** Even with the RAG query
+route live, `RelevanceRanker.rank()` expects raw candidate dicts carrying
+an `"embedding"` key — but `PgVectorRetriever.search()` computes cosine
+similarity in SQL and returns `RetrievedChunk` with a `score`, never the
+embedding itself. `RelevanceRanker` is structurally built for a different
+retrieval shape (embeddings fetched application-side) than how
+`PgVectorRetriever`/`DocumentLoader` actually work today. `CosineReranker`
+(already live, re-sorting the SQL-computed scores) fills the equivalent
+role for this data shape — wiring `RelevanceRanker` alongside it would be
+redundant, not complementary, unless `PgVectorRetriever.search()` is
+changed to also return embeddings (a real schema/bandwidth decision, out
+of scope here).
+
+Tested: `tests/unit/test_runtime_context_engine.py` (encode/decode round
+trip, chronological ordering, rag-drops-before-memory under a tight
+budget, graceful no-op when `document_loader`/`context_engine` unset),
+`tests/integration/test_runtime_context_engine.py` (real `ConversationMemory`
+round trip through real Postgres). Verified live: booted the real gateway,
+ran a two-turn chat, confirmed `input_tokens` grew between turns
+(memory/system context actually flowing through, not just unit-tested).
 
 ## 2. RAG query-side gateway route — DONE (2026-10-20)
 
@@ -130,3 +172,24 @@ the real gateway with Redis configured, confirmed `embedding_cache.enabled
 backend=redis`, and ran `CachingEmbedder` + real `RedisCache` together
 against the live container outside the test suite to confirm the second
 identical call was a genuine cache hit (`inner.calls == 1`).
+
+## 6. `AgentExecutor` (tool-use loop) `ContextEngine` integration
+
+Scoped out of item #1 above. Would need its own design pass: the tool-use
+system prompt already carries protocol instructions + tool schemas (see
+`_build_system_prompt`), tool results get injected mid-loop rather than at
+turn start, and `ModelRequest.metadata["tools"]` (wired for `CloudModel`
+native tool-use) would need to coexist with whatever `ContextEngine`
+reconstruction scheme is used. Not simply "copy the `AthenaRuntime`
+pattern" without checking those interactions first.
+
+## 7. `RelevanceRanker` / embedding-aware retrieval
+
+`RelevanceRanker.rank()` expects candidate chunks carrying their own
+`"embedding"` — but `PgVectorRetriever.search()` computes cosine similarity
+in SQL and only returns the score, never the vector. Wiring `RelevanceRanker`
+for real means either changing `PgVectorRetriever.search()` to also select
+and return each row's `embedding` column (bandwidth/schema decision), or
+accepting it stays unused in favor of `CosineReranker` (already live),
+which fills the equivalent role for the data shape `PgVectorRetriever`
+actually produces.
