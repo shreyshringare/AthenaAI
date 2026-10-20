@@ -40,6 +40,10 @@ services:
       # Without it the server runs in mock mode (still fully functional for demo).
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-3-5-haiku-20241022}
+      # Set ATHENA_GATEWAY_API_KEY to require X-API-Key on /v1/* routes.
+      # Without it the gateway runs unauthenticated (demo mode).
+      ATHENA_GATEWAY_API_KEY: ${ATHENA_GATEWAY_API_KEY:-}
+      ATHENA_CORS_ALLOWED_ORIGINS: ${ATHENA_CORS_ALLOWED_ORIGINS:-}
       ATHENA_DB_URL: postgresql://athena:athena@postgres:5432/athena
       ATHENA_MAX_CONCURRENT: "20"
       ATHENA_MAX_AGENT_ITER: "10"

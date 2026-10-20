@@ -206,6 +206,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     config = AthenaConfig()
 
+    app.state.gateway_api_key = config.gateway_api_key
+    if not config.gateway_api_key:
+        _logger.warning(
+            "auth.disabled",
+            reason="ATHENA_GATEWAY_API_KEY not set -- all endpoints are unauthenticated",
+        )
+    else:
+        _logger.info("auth.enabled")
+
     async with core_lifespan(config) as registry:
         model = _build_model(config)
         tool_registry = _build_tool_registry()
@@ -231,10 +240,24 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         _logger.info("athena.shutdown")
 
 
-def create_app() -> FastAPI:
+def create_app(cors_allowed_origins: list[str] | None = None) -> FastAPI:
     """Build the FastAPI app instance. Call once; the module-level `app`
     below is what uvicorn actually serves.
+
+    cors_allowed_origins defaults to parsing ATHENA_CORS_ALLOWED_ORIGINS
+    (comma-separated, same convention as ATHENA_ALLOWED_DOMAINS elsewhere
+    in this module) when not passed explicitly -- tests pass a list
+    directly instead of touching process env vars. An empty list (the
+    default when unset) means no cross-origin requests are allowed at all:
+    secure-by-default, matching the HTTPTool allowlist's "safer to omit
+    than register wide open" reasoning. The previous allow_origins=["*"]
+    combined with allow_credentials=True let any website call this API
+    using a logged-in user's session/credentials.
     """
+    if cors_allowed_origins is None:
+        raw = os.environ.get("ATHENA_CORS_ALLOWED_ORIGINS", "")
+        cors_allowed_origins = [o.strip() for o in raw.split(",") if o.strip()]
+
     app = FastAPI(
         title="AthenaAI",
         description=(
@@ -249,7 +272,7 @@ def create_app() -> FastAPI:
 
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
+        allow_origins=cors_allowed_origins,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],

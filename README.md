@@ -232,7 +232,10 @@ make down
 | `ANTHROPIC_MODEL` | `claude-3-5-haiku-20241022` | Model ID |
 | `ATHENA_DB_URL` | — | PostgreSQL DSN for memory + RAG |
 | `ATHENA_EMBEDDER_URL` | — | Embeddings API base URL |
+| `ATHENA_EMBEDDER_API_KEY` | — | API key for the embeddings endpoint above |
 | `ATHENA_ALLOWED_DOMAINS` | — | Comma-separated domains HTTPTool can reach |
+| `ATHENA_GATEWAY_API_KEY` | — | Requires `X-API-Key` on every `/v1/*` route when set. Unset = unauthenticated (local demo mode) |
+| `ATHENA_CORS_ALLOWED_ORIGINS` | — | Comma-separated origins allowed to call this API from a browser. Unset = no cross-origin requests at all |
 | `ATHENA_MAX_CONCURRENT` | `20` | Semaphore cap on concurrent model calls |
 | `ATHENA_MAX_AGENT_ITER` | `10` | Hard cap on agent loop iterations |
 | `LOG_LEVEL` | `INFO` | |

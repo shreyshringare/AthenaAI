@@ -109,3 +109,9 @@ class AthenaConfig(BaseSettings):
 
     # Agent
     agent_max_iterations: int = Field(default=10)
+
+    # Gateway auth: empty means unauthenticated (zero-config local demo
+    # mode) -- see athenai.gateway.auth.require_api_key for the enforcement
+    # side and why "unset" degrades to "no auth" rather than refusing to
+    # start.
+    gateway_api_key: str = Field(default="")

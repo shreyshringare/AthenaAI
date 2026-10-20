@@ -20,16 +20,22 @@ for /v1/chat*, `request.app.state.agent` for /v1/agents/run), then re-encode
 the internal result back into a Pydantic response schema. No business logic
 lives here — routing failures into HTTPException and bumping metrics counters
 is the extent of it.
+
+AUTH: every route below except health/ready/metrics carries
+`dependencies=[Depends(require_api_key)]` — see athenai.gateway.auth for
+why that's a per-route dependency and not a blanket middleware (probes and
+scrapers need to stay open).
 """
 
 from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from athenai.core.types import AIRequest, Message, MessageRole
+from athenai.gateway.auth import require_api_key
 from athenai.gateway.schemas import (
     AgentRunRequest,
     AgentRunResponse,
@@ -75,7 +81,7 @@ async def metrics() -> StreamingResponse:
     return StreamingResponse(iter([data]), media_type=CONTENT_TYPE_LATEST)
 
 
-@router.post("/v1/chat", response_model=ChatResponse)
+@router.post("/v1/chat", response_model=ChatResponse, dependencies=[Depends(require_api_key)])
 async def chat(body: ChatRequest, request: Request) -> ChatResponse:
     """Single-turn, non-streaming chat. Mints a fresh request_id/trace_id per
     call (the client cannot supply its own) so every request is independently
@@ -114,7 +120,7 @@ async def chat(body: ChatRequest, request: Request) -> ChatResponse:
     )
 
 
-@router.post("/v1/chat/stream")
+@router.post("/v1/chat/stream", dependencies=[Depends(require_api_key)])
 async def chat_stream(body: ChatRequest, request: Request) -> StreamingResponse:
     """Streams the chat response as Server-Sent Events.
 
@@ -153,7 +159,9 @@ async def chat_stream(body: ChatRequest, request: Request) -> StreamingResponse:
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
-@router.post("/v1/agents/run", response_model=AgentRunResponse)
+@router.post(
+    "/v1/agents/run", response_model=AgentRunResponse, dependencies=[Depends(require_api_key)]
+)
 async def agent_run(body: AgentRunRequest, request: Request) -> AgentRunResponse:
     """Run the shared `app.state.agent` to completion on `body.task`.
 
@@ -189,7 +197,11 @@ async def agent_run(body: AgentRunRequest, request: Request) -> AgentRunResponse
     )
 
 
-@router.post("/v1/documents/ingest", response_model=DocumentIngestResponse)
+@router.post(
+    "/v1/documents/ingest",
+    response_model=DocumentIngestResponse,
+    dependencies=[Depends(require_api_key)],
+)
 async def document_ingest(
     body: DocumentIngestRequest, request: Request
 ) -> DocumentIngestResponse:
@@ -218,7 +230,11 @@ async def document_ingest(
     return DocumentIngestResponse(document_id=body.document_id, chunks_stored=chunks)
 
 
-@router.post("/v1/documents/search", response_model=DocumentSearchResponse)
+@router.post(
+    "/v1/documents/search",
+    response_model=DocumentSearchResponse,
+    dependencies=[Depends(require_api_key)],
+)
 async def document_search(
     body: DocumentSearchRequest, request: Request
 ) -> DocumentSearchResponse:
