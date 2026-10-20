@@ -74,14 +74,32 @@ booted the real gateway with `ATHENA_ALLOWED_TOOLS` set, confirmed
 `tool_permissions.enabled` logs the configured set and the agent still runs
 end to end.
 
-## 4. `CloudModel` tool-call parsing
+## 4. `CloudModel` tool-call parsing — DONE (2026-10-20)
 
-`CloudModel.generate()` never populates `ModelResponse.metadata["tool_calls"]`,
-so the "structured tool_calls" path in `AgentExecutor` (checked first, before
-falling back to the `TOOL_CALL:` text parser) is dead code whenever
-`CloudModel` is the backend. Needs new logic to read Anthropic's `tool_use`
-content blocks off the real API response and translate them into the
-`{"name", "arguments"}` shape the executor expects.
+Turned out to need both sides, not just response parsing (the original framing
+here undersold it): `AgentExecutor.run()` now passes `metadata={"tools": schemas}`
+on every `ModelRequest` — `ToolRegistry.get_schemas()`'s shape already matches
+Anthropic's tool-schema format exactly. `CloudModel.generate()` forwards that
+as the request's `tools` field (omitted when empty) and, on the response side,
+walks every `content` block: `text` blocks join into `.content`, `tool_use`
+blocks become `metadata["tool_calls"]` in the `{"name", "arguments"}` shape
+`AgentExecutor` already expects. Without the request side, Claude would never
+emit native `tool_use` blocks regardless of how well the response is parsed —
+the API only offers tool use when the request declares what tools exist.
+
+The `TOOL_CALL:` text-protocol system-prompt instructions stay in place
+unconditionally (harmless for MockModel/LocalModel, and `AgentExecutor`
+checks `metadata["tool_calls"]` first so a populated list always wins —
+no double-execution risk even if Claude also emits text matching the old
+protocol).
+
+Tested: `tests/unit/test_models.py` (tool_use parsing, mixed text+tool_use,
+tools-field forwarding, omitted-when-empty) and
+`tests/unit/test_agent.py::test_executor_uses_structured_tool_calls_and_forwards_schemas`
+proving the executor-level wiring end to end. Not tested against the real
+Anthropic API (no `base_url` override exists via env var in `app.py`, and
+that would mean calling a real paid endpoint) — respx-mocked `httpx` calls
+are the same level of verification this class has always used.
 
 ## 5. `CacheBackend` implementation
 

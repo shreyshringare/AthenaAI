@@ -7,12 +7,17 @@ set in the environment; if construction fails it logs and falls back to
 MockModel so the gateway still boots. AgentExecutor and AthenaRuntime call
 generate() the same way regardless of which adapter is active.
 
-NOTE: generate() only reads the first content block's text
-(data["content"][0]["text"]) from the Anthropic response and does not
-propagate structured tool_use blocks into ModelResponse.metadata — callers
-that need tool calls out of a CloudModel response currently rely on the
-text-based "TOOL_CALL: {...}" protocol described in agents/executor.py,
-the same as MockModel.
+TOOL USE: generate() forwards request.metadata["tools"] (a list of
+{name, description, input_schema} dicts — exactly ToolRegistry.get_schemas()'s
+shape, which AgentExecutor now passes through) as the Anthropic API
+request's "tools" field, and translates any tool_use content blocks in the
+response into ModelResponse.metadata["tool_calls"] (the {"name",
+"arguments"} shape AgentExecutor's structured path expects). Without the
+request side, Claude never emits native tool_use blocks regardless of
+response-parsing — the API only offers tool use when the request declares
+what tools exist. AgentExecutor's TOOL_CALL: text-protocol system-prompt
+instructions stay in place as a fallback for MockModel/LocalModel and any
+response that comes back as plain text instead.
 
 ERROR SEMANTICS:
 generate() never returns a partial/failed ModelResponse — network errors,
@@ -87,6 +92,9 @@ class CloudModel:
         }
         if request.system:
             payload["system"] = request.system
+        tools = request.metadata.get("tools")
+        if tools:
+            payload["tools"] = tools
 
         try:
             resp = await self._client.post(self.base_url, json=payload)
@@ -112,15 +120,25 @@ class CloudModel:
             )
 
         data = resp.json()
-        content = data["content"][0]["text"] if data.get("content") else ""
+        text_parts: list[str] = []
+        tool_calls: list[dict[str, Any]] = []
+        for block in data.get("content", []):
+            block_type = block.get("type")
+            if block_type == "text":
+                text_parts.append(block.get("text", ""))
+            elif block_type == "tool_use":
+                tool_calls.append(
+                    {"name": block.get("name", ""), "arguments": block.get("input", {})}
+                )
         usage = data.get("usage", {})
 
         return ModelResponse(
-            content=content,
+            content="".join(text_parts),
             model_name=data.get("model", self.model_name),
             input_tokens=usage.get("input_tokens", 0),
             output_tokens=usage.get("output_tokens", 0),
             finish_reason=data.get("stop_reason", "stop"),
+            metadata={"tool_calls": tool_calls} if tool_calls else {},
         )
 
     async def health_check(self) -> bool:

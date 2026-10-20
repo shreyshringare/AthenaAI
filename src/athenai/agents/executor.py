@@ -21,11 +21,13 @@ this is the honest shape for what the system can actually authenticate
 today.
 
 HOW THE LOOP WORKS:
-1. Build a system prompt that lists all registered tools.
+1. Build a system prompt that lists all registered tools; also pass the
+   same schemas via ModelRequest.metadata["tools"] every iteration.
 2. Call the model with the current message history.
 3. Inspect the response for structured tool_calls in response.metadata
-   (currently unused by any adapter) or TOOL_CALL directives (text
-   protocol — the path every adapter actually takes today).
+   (CloudModel populates this from Anthropic's native tool_use blocks —
+   see models/cloud.py) or TOOL_CALL directives (text protocol — the
+   fallback path MockModel/LocalModel and any plain-text response use).
 4. If tool calls found: execute them in parallel via asyncio.gather,
    append results to message history, continue to next iteration.
 5. If no tool calls: treat response as final answer, return AgentResult.
@@ -36,14 +38,14 @@ Independent tool calls (e.g. "look up A and calculate B") should not
 serialise. asyncio.gather runs them concurrently; individual failures are
 caught and surfaced per-call, not globally.
 
-WHY TEXT PROTOCOL (TOOL_CALL: {...}):
-The Anthropic tool_use block format requires the SDK to encode tool schemas
-into the API request and decode content blocks. The text protocol works with
-any model (including MockModel) without SDK dependency, making the loop
-testable without API keys. The structured response.metadata["tool_calls"]
-path below is checked first but is currently dead in practice: no adapter
-(CloudModel included — see models/cloud.py) populates it yet, so every
-model falls through to the text parser.
+WHY TEXT PROTOCOL (TOOL_CALL: {...}) STAYS, EVEN THOUGH CloudModel NOW
+SUPPORTS NATIVE tool_use:
+MockModel and LocalModel have no structured tool-use mechanism to speak
+of, so the text protocol remains the only way they can signal a tool call
+-- and it's harmless to also instruct Claude this way, since the
+structured response.metadata["tool_calls"] path is checked first; a
+populated list always wins and _parse_tool_calls() on the text content
+never runs. No double-execution risk.
 """
 
 from __future__ import annotations
@@ -95,7 +97,8 @@ class AgentExecutor:
         status = AgentStatus.CREATED
         steps: list[AgentStep] = []
         messages: list[dict[str, str]] = [{"role": "user", "content": task}]
-        system = self._build_system_prompt()
+        schemas = self._registry.get_schemas()
+        system = self._build_system_prompt(schemas)
 
         status = transition(status, AgentStatus.RUNNING)
 
@@ -104,6 +107,7 @@ class AgentExecutor:
                 messages=messages,
                 model_name="agent",
                 system=system,
+                metadata={"tools": schemas},
             )
             response = await self._model.generate(request)
 
@@ -216,15 +220,21 @@ class AgentExecutor:
             self._validator.validate_permission(tool, user_id, self._allowed_tools)
         return await tool.execute(tool_call["arguments"])
 
-    def _build_system_prompt(self) -> str:
+    def _build_system_prompt(self, schemas: list[dict[str, Any]] | None = None) -> str:
         """Build the system prompt, including the text tool-call protocol.
 
         Falls back to a plain "helpful assistant" prompt (no TOOL_CALL
         instructions) when the registry has no tools, so an agent run with
         an empty registry doesn't confuse the model with a protocol it can
         never actually use.
+
+        schemas defaults to a fresh registry lookup when not passed (kept
+        optional so existing direct callers/tests don't break) -- run()
+        passes the one it already computed to avoid calling get_schemas()
+        twice per iteration.
         """
-        schemas = self._registry.get_schemas()
+        if schemas is None:
+            schemas = self._registry.get_schemas()
         if not schemas:
             return "You are a helpful AI assistant."
         tools_json = json.dumps(schemas, indent=2)

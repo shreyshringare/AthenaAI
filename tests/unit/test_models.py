@@ -169,4 +169,144 @@ async def test_cloud_200_returns_response() -> None:
         assert resp.content == "Hello from Claude!"
         assert resp.input_tokens == 10
         assert resp.output_tokens == 5
+        assert resp.metadata.get("tool_calls") is None or resp.metadata["tool_calls"] == []
+        await model.aclose()
+
+
+@pytest.mark.asyncio
+async def test_cloud_tool_use_block_populates_metadata_tool_calls() -> None:
+    """Anthropic's real structured tool-use format: a tool_use content
+    block with `name`/`input` must become metadata["tool_calls"] in the
+    {"name", "arguments"} shape AgentExecutor expects -- not left for the
+    TOOL_CALL: text-protocol fallback to parse."""
+    with respx.mock:
+        respx.post(_ANTHROPIC_URL).mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "id": "msg_01",
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "toolu_01",
+                            "name": "calculator",
+                            "input": {"expression": "6*7"},
+                        }
+                    ],
+                    "model": "claude-sonnet-4-6",
+                    "stop_reason": "tool_use",
+                    "usage": {"input_tokens": 20, "output_tokens": 8},
+                },
+            )
+        )
+        model = CloudModel(api_key="test-key")
+        resp = await model.generate(_request("what is 6*7?"))
+        assert resp.metadata["tool_calls"] == [
+            {"name": "calculator", "arguments": {"expression": "6*7"}}
+        ]
+        assert resp.finish_reason == "tool_use"
+        await model.aclose()
+
+
+@pytest.mark.asyncio
+async def test_cloud_mixed_text_and_tool_use_blocks() -> None:
+    """Claude can emit explanatory text alongside a tool_use block in the
+    same response -- text blocks must still populate .content."""
+    with respx.mock:
+        respx.post(_ANTHROPIC_URL).mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "content": [
+                        {"type": "text", "text": "Let me calculate that."},
+                        {
+                            "type": "tool_use",
+                            "id": "toolu_02",
+                            "name": "calculator",
+                            "input": {"expression": "2+2"},
+                        },
+                    ],
+                    "model": "claude-sonnet-4-6",
+                    "stop_reason": "tool_use",
+                    "usage": {"input_tokens": 15, "output_tokens": 10},
+                },
+            )
+        )
+        model = CloudModel(api_key="test-key")
+        resp = await model.generate(_request("what is 2+2?"))
+        assert resp.content == "Let me calculate that."
+        assert resp.metadata["tool_calls"] == [
+            {"name": "calculator", "arguments": {"expression": "2+2"}}
+        ]
+        await model.aclose()
+
+
+@pytest.mark.asyncio
+async def test_cloud_forwards_tools_from_request_metadata() -> None:
+    """When the caller supplies tool schemas via ModelRequest.metadata["tools"],
+    CloudModel must forward them to Anthropic as the request's "tools" field --
+    without this, Claude never emits native tool_use blocks regardless of
+    response-parsing logic, since the API only offers tool use when the
+    request declares what tools exist."""
+    captured: dict = {}
+
+    def _capture(request: httpx.Request) -> httpx.Response:
+        import json
+
+        captured["payload"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={
+                "content": [{"type": "text", "text": "ok"}],
+                "model": "claude-sonnet-4-6",
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            },
+        )
+
+    with respx.mock:
+        respx.post(_ANTHROPIC_URL).mock(side_effect=_capture)
+        model = CloudModel(api_key="test-key")
+        tool_schemas = [
+            {
+                "name": "calculator",
+                "description": "Evaluates arithmetic expressions.",
+                "input_schema": {"type": "object", "properties": {}},
+            }
+        ]
+        request = ModelRequest(
+            messages=[{"role": "user", "content": "hi"}],
+            model_name="agent",
+            metadata={"tools": tool_schemas},
+        )
+        await model.generate(request)
+        assert captured["payload"]["tools"] == tool_schemas
+        await model.aclose()
+
+
+@pytest.mark.asyncio
+async def test_cloud_omits_tools_field_when_none_supplied() -> None:
+    captured: dict = {}
+
+    def _capture(request: httpx.Request) -> httpx.Response:
+        import json
+
+        captured["payload"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={
+                "content": [{"type": "text", "text": "ok"}],
+                "model": "claude-sonnet-4-6",
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            },
+        )
+
+    with respx.mock:
+        respx.post(_ANTHROPIC_URL).mock(side_effect=_capture)
+        model = CloudModel(api_key="test-key")
+        await model.generate(_request("hi"))
+        assert "tools" not in captured["payload"]
         await model.aclose()

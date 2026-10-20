@@ -118,6 +118,59 @@ async def test_executor_tool_call_via_text_protocol():
 
 
 @pytest.mark.asyncio
+async def test_executor_uses_structured_tool_calls_and_forwards_schemas():
+    """Proves the full CloudModel-shaped wiring at the executor level: the
+    request it builds carries metadata["tools"] (the registry's schemas),
+    and a response with metadata["tool_calls"] already populated (as a
+    real CloudModel now returns) is consumed directly -- never falling
+    through to the TOOL_CALL: text parser."""
+    captured_requests = []
+
+    class StructuredToolCallModel:
+        name = "structured"
+        _calls = 0
+
+        async def generate(self, request):
+            from athenai.models.base import ModelResponse
+
+            captured_requests.append(request)
+            self.__class__._calls += 1
+            if self.__class__._calls == 1:
+                return ModelResponse(
+                    content="",
+                    model_name=self.name,
+                    input_tokens=10,
+                    output_tokens=5,
+                    metadata={
+                        "tool_calls": [
+                            {"name": "calculator", "arguments": {"expression": "6*7"}}
+                        ]
+                    },
+                )
+            return ModelResponse(
+                content="The answer is 42.",
+                model_name=self.name,
+                input_tokens=10,
+                output_tokens=5,
+            )
+
+        async def health_check(self):
+            return True
+
+    registry = ToolRegistry()
+    registry.register(CalculatorTool())
+
+    executor = AgentExecutor(model=StructuredToolCallModel(), tool_registry=registry)
+    result = await executor.run("What is 6 * 7?")
+
+    assert captured_requests[0].metadata["tools"][0]["name"] == "calculator"
+    assert result.status == AgentStatus.COMPLETED
+    tool_step = result.steps[0]
+    assert tool_step.tool_calls == [{"name": "calculator", "arguments": {"expression": "6*7"}}]
+    assert tool_step.tool_results[0]["result"] == 42
+
+
+@pytest.mark.asyncio
 async def test_executor_stops_at_max_iterations():
     class LoopingModel:
         name = "looper"
