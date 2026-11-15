@@ -78,8 +78,8 @@ HTTP Request
                      │                      │
            ┌─────────▼──────────────────────▼──────────┐
            │              Model Router (P3)             │
-           │  quality/cost/latency scoring              │
-           │  circuit-aware selection · complexity cls  │
+           │  quality/cost/latency scoring, tilted by   │
+           │  token-count tier · circuit-aware · fallback│
            └──────┬────────────────────────────────────-┘
                   │
        ┌──────────▼──────────┐
@@ -122,6 +122,8 @@ Six engineering decisions that aren't obvious until you've hit the problem:
 | Interface coupling | `Protocol` over `ABC` | Structural subtyping — `MockModel` satisfies `Model` without inheriting it, enabling test doubles with zero boilerplate |
 | Context retrieval latency | `asyncio.gather(memory, rag)` | Memory and retrieval are independent — run them in parallel, pay the cost of the slower one instead of both |
 | Model flakiness | Circuit breaker (CLOSED→OPEN→HALF_OPEN) | Open circuits are skipped at routing time, not mid-call — fail fast before the model is contacted |
+| Transient errors | Retry with exponential backoff + full jitter (outside the breaker) | Every failed attempt counts toward tripping the breaker; jitter stops synchronized retry storms. Still-failing models are excluded and the call falls over to the next-best backend |
+| Overload | Token-bucket rate limits: per-model (outbound) and per-client (inbound, HTTP 429 + `Retry-After`) | Raise instead of block, so backpressure reaches the caller rather than queueing without bound |
 | Pipeline correctness | Frozen dataclasses end-to-end | `AIRequest`, `AIResponse`, `TraceSpan` can't be mutated mid-pipeline, safe to cache, safe across async boundaries |
 | SQL injection + privilege | String check + `readonly=True` transaction | String-level checks can be bypassed by obfuscation. DB-level readonly enforcement is the second, unbypassable layer |
 
@@ -144,7 +146,7 @@ Six engineering decisions that aren't obvious until you've hit the problem:
 | P10 | Observability — structlog structured logging, Prometheus metrics | — |
 | P14 | Docker Compose — api + postgres/pgvector + Prometheus + Grafana + Makefile | — |
 
-**Total: 112 unit tests. All passing.**
+**Total: 234 tests (193 unit + 41 integration against real Postgres and Redis).**
 
 ---
 
@@ -170,7 +172,7 @@ uv pip install -e ".[dev]"
 make dev           # uvicorn on :8000
 
 # Test
-make test-unit     # 112 unit tests, no DB needed
+make test-unit     # 193 unit tests, no DB needed
 make test          # full suite including integration
 
 # Lint + types
@@ -184,6 +186,18 @@ make down
 ```
 
 ---
+
+
+## 2-minute demo (free, no API keys)
+
+Shows routing, retry + circuit-breaker failover, rate limiting and parallel tool calls on screen, using two mock backends you can break on demand:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.demo.yml up -d --build
+python scripts/demo.py          # --fast skips the pauses
+```
+
+Open Grafana (http://localhost:3000, `admin` / `athena`, dashboard "AthenaAI Overview") next to the terminal to watch the metrics move. Demo mode also exposes `/debug/status`, `/debug/fail` and `/debug/reset` (visible in Swagger) so you can kill a backend by hand; they return 404 unless demo mode is on. For real (still free) model output, install [Ollama](https://ollama.com) and set `ATHENA_LOCAL_MODEL_NAME`.
 
 ## API reference
 
@@ -240,6 +254,13 @@ make down
 | `ATHENA_ALLOWED_TOOLS` | — | Comma-separated tool names the agent may use. Unset = all registered tools allowed |
 | `ATHENA_GATEWAY_API_KEY` | — | Requires `X-API-Key` on every `/v1/*` route when set. Unset = unauthenticated (local demo mode) |
 | `ATHENA_CORS_ALLOWED_ORIGINS` | — | Comma-separated origins allowed to call this API from a browser. Unset = no cross-origin requests at all |
+| `ATHENA_LOCAL_MODEL_NAME` | — | Register an Ollama model as the `local` routing backend (alongside `cloud` when `ANTHROPIC_API_KEY` is set) |
+| `ATHENA_LOCAL_MODEL_URL` | `http://localhost:11434` | Ollama base URL |
+| `ATHENA_CLOUD_QUALITY` / `_COST_PER_1K` / `_LATENCY_MS` | `0.9` / `0.003` / `900` | Scoring inputs for the cloud backend (also `ATHENA_LOCAL_*`, defaults `0.6` / `0` / `1500`) |
+| `ATHENA_CIRCUIT_BREAKER_FAILURE_THRESHOLD` / `_COOLDOWN_S` | `5` / `30` | Per-model breaker settings |
+| `ATHENA_RETRY_MAX_ATTEMPTS` / `_BASE_DELAY_S` | `3` / `0.5` | Retry with exponential backoff + jitter |
+| `ATHENA_MODEL_RATE_LIMIT_CAPACITY` / `_PER_S` | `30` / `10` | Outbound token bucket per model backend |
+| `ATHENA_RATE_LIMIT_CAPACITY` / `ATHENA_RATE_LIMIT_REFILL_PER_S` | `60` / `2` | Inbound per-client limit on `/v1/*` (keyed by API key or IP). Capacity `0` disables |
 | `ATHENA_MAX_CONCURRENT` | `20` | Semaphore cap on concurrent model calls |
 | `ATHENA_MAX_AGENT_ITER` | `10` | Hard cap on agent loop iterations |
 | `LOG_LEVEL` | `INFO` | |

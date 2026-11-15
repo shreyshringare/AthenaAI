@@ -1,0 +1,13 @@
+# Overlay that starts the API in demo mode (two controllable mock backends and
+# /debug fault-injection routes; free, no API keys). Local use only.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.demo.yml up -d --build
+#   python scripts/demo.py
+services:
+  api:
+    environment:
+      ATHENA_DEMO_MODE: "true"
+      # Short Prometheus-visible demo windows; inbound limit low enough that
+      # the demo's burst step reaches a 429 quickly.
+      ATHENA_RATE_LIMIT_CAPACITY: "30"
+      ATHENA_RATE_LIMIT_REFILL_PER_S: "1"

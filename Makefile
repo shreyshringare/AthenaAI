@@ -1,4 +1,4 @@
-.PHONY: install dev lint type test test-unit test-integration up down logs demo clean
+.PHONY: demo-live install dev lint type test test-unit test-integration up down logs demo clean
 
 # ── Setup ──────────────────────────────────────────────────────────────────────
 install:
@@ -40,6 +40,11 @@ dev:
 	uv run uvicorn athenai.gateway.app:app --reload --port 8000
 
 # Quick smoke test — works with both `make dev` and `make up`
+# Narrated demo of routing / failover / rate limiting / agent. Free: mock backends.
+demo-live:
+	docker compose -f docker-compose.yml -f docker-compose.demo.yml up -d --build
+	python scripts/demo.py
+
 demo:
 	@echo "=== Health check ==="
 	@curl -s http://localhost:8000/health | python -m json.tool
