@@ -15,7 +15,7 @@ TEST_DB_DSN = os.environ.get(
 
 TEST_REDIS_URL = os.environ.get(
     "ATHENA_TEST_REDIS_URL",
-    "redis://localhost:6380/0",
+    "redis://127.0.0.1:6380/0",
 )
 
 

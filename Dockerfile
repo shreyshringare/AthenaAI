@@ -16,7 +16,7 @@ COPY src/ ./src/
 
 # Install into a venv at /app/.venv
 RUN uv venv /app/.venv && \
-    uv pip install --python /app/.venv/bin/python -e ".[dev]"
+    uv pip install --python /app/.venv/bin/python .
 
 # ---- runtime stage ----
 FROM python:3.12-slim AS runtime
@@ -27,8 +27,6 @@ WORKDIR /app
 
 # Copy installed venv from builder
 COPY --from=builder /app/.venv /app/.venv
-COPY --from=builder /build/src /app/src
-COPY --from=builder /build/pyproject.toml /app/pyproject.toml
 
 # Activate venv
 ENV PATH="/app/.venv/bin:$PATH" \

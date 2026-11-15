@@ -17,13 +17,14 @@ from __future__ import annotations
 from typing import Any
 
 from athenai.context.ranking import RelevanceRanker
+from athenai.core.protocols import EmbedderProtocol
 from athenai.rag.chunker import SlidingWindowChunker
 from athenai.rag.embedder import CloudEmbedder, MockEmbedder
 from athenai.rag.parser import DocumentParser
 from athenai.rag.reranker import CosineReranker
 from athenai.rag.retriever import PgVectorRetriever, RetrievedChunk
 
-_AnyEmbedder = CloudEmbedder | MockEmbedder
+_AnyEmbedder = CloudEmbedder | MockEmbedder | EmbedderProtocol
 
 
 class DocumentLoader:
@@ -122,10 +123,10 @@ class DocumentLoader:
         )
         return [
             RetrievedChunk(
-                chunk_id=r.metadata["chunk_id"],
-                document_id=r.metadata["document_id"],
+                chunk_id=str(r.metadata["chunk_id"]),
+                document_id=str(r.metadata["document_id"]),
                 content=r.content,
-                chunk_index=r.metadata["chunk_index"],
+                chunk_index=int(str(r.metadata["chunk_index"])),
                 score=r.score,
             )
             for r in ranked

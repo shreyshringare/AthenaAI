@@ -12,7 +12,6 @@ from athenai.context.budget import TokenBudgetManager
 from athenai.context.engine import ContextEngine
 from athenai.core.types import AIRequest, Message, MessageRole
 from athenai.memory.conversation import ConversationMemory
-from athenai.models.mock import MockModel
 from athenai.runtime.pipeline import AthenaRuntime
 
 

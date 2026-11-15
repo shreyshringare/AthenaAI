@@ -28,7 +28,7 @@ import numpy as np
 
 @dataclass
 class RankedChunk:
-    """A chunk after scoring; `metadata` excludes `content`/`embedding` (already surfaced separately)."""
+    """A chunk after scoring; `metadata` excludes `content`/`embedding` (surfaced separately)."""
 
     content: str
     score: float

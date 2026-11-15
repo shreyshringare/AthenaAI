@@ -9,11 +9,13 @@ loop instead: RAG augmentation of the task, and token-budgeting of the
 
 from __future__ import annotations
 
+from typing import ClassVar
+
 import pytest
 
+from athenai.agents.executor import AgentExecutor
 from athenai.context.budget import TokenBudgetManager
 from athenai.context.engine import ContextEngine
-from athenai.agents.executor import AgentExecutor
 from athenai.models.base import ModelResponse
 from athenai.tools.calculator import CalculatorTool
 from athenai.tools.registry import ToolRegistry
@@ -144,7 +146,7 @@ async def test_context_engine_drops_oldest_transcript_first_not_newest():
     class ThreeToolCallsModel:
         name = "three-calls"
         _calls = 0
-        _expressions = ["1+1", "100+100", "100000+100000"]
+        _expressions: ClassVar[list[str]] = ["1+1", "100+100", "100000+100000"]
 
         async def generate(self, request):
             captured.append(request)
