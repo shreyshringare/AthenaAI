@@ -6,7 +6,8 @@ COMPONENT INIT ORDER (lifespan):
 2. AthenaConfig — load once from env, threaded into core.lifecycle.lifespan()
    so every component below reads from one validated settings object instead
    of calling os.environ directly.
-3. Model — MockModel by default; CloudModel when anthropic_api_key is set.
+3. Model — RoutedModel over cloud/local backends (MockModel if none are
+   configured); see _build_model. Also builds the per-client rate limiter.
 4. Tool registry — register all built-in tools.
 5. DocumentLoader — only if DB URL, embedder URL, and embedder API key are
    all configured. Built before Runtime (next) so Runtime can be handed
@@ -59,9 +60,18 @@ from athenai.context.budget import TokenBudgetManager
 from athenai.context.engine import ContextEngine
 from athenai.core.config import AthenaConfig
 from athenai.core.lifecycle import lifespan as core_lifespan
+from athenai.core.protocols import CacheBackend
+from athenai.gateway.debug import debug_router
+from athenai.gateway.ratelimit import ClientRateLimiter
 from athenai.gateway.routes import router
 from athenai.models.mock import MockModel
+from athenai.models.routed import Backend, RoutedModel
 from athenai.observability.logger import configure_logging, get_logger
+from athenai.resilience.circuit_breaker import CircuitBreaker
+from athenai.resilience.rate_limiter import TokenBucketRateLimiter
+from athenai.resilience.retry import RetryPolicy
+from athenai.routing.policies import RoutingPolicy
+from athenai.routing.scorer import ModelMetadata
 from athenai.runtime.pipeline import AthenaRuntime
 from athenai.tools.calculator import CalculatorTool
 from athenai.tools.http import HTTPTool
@@ -70,33 +80,102 @@ from athenai.tools.registry import ToolRegistry
 _logger = get_logger(__name__)
 
 
-def _build_model(config: AthenaConfig) -> object:
-    """Pick the model backend for this process.
+def _backend(role: str, model: object, quality: float, cost: float, latency: float,
+             config: AthenaConfig) -> Backend:
+    return Backend(
+        metadata=ModelMetadata(
+            role=role, quality_score=quality, cost_per_1k_tokens=cost, avg_latency_ms=latency
+        ),
+        model=model,
+        breaker=CircuitBreaker(
+            failure_threshold=config.circuit_breaker_failure_threshold,
+            cooldown_s=config.circuit_breaker_cooldown_s,
+        ),
+        limiter=TokenBucketRateLimiter(
+            config.model_rate_limit_capacity, config.model_rate_limit_per_s
+        ),
+    )
 
-    Falls back to MockModel (not a raised error) if config.anthropic_api_key
-    is set but CloudModel construction fails — a bad key or missing
-    dependency should degrade the server to mock mode, not crash startup.
 
-    model_name still comes from the raw ANTHROPIC_MODEL env var, not
-    AthenaConfig: config.model_registry models routing *roles* (fast/smart/
-    etc., for athenai.routing, which this module doesn't use), not "the
-    concrete Anthropic model id to construct CloudModel with" — forcing
-    that mapping would be inventing a meaning config.py's author didn't
-    give it.
+def _build_demo_model(config: AthenaConfig, app: FastAPI) -> RoutedModel:
+    """Two DemoMockModel backends with very different cost/latency/quality so
+    routing is visible, plus a short breaker threshold/cooldown and fast
+    retries so a recorded failover happens in seconds. Handles for the
+    /debug routes go on app.state."""
+    from athenai.models.demo import DemoMockModel
+
+    fast, smart = DemoMockModel("fast-mock"), DemoMockModel("smart-mock")
+    app.state.demo_models = {"fast-mock": fast, "smart-mock": smart}
+    demo_cfg = config.model_copy(
+        update={"circuit_breaker_failure_threshold": 3, "circuit_breaker_cooldown_s": 15.0}
+    )
+    model = RoutedModel(
+        [
+            _backend("fast-mock", fast, 0.5, 0.0005, 100.0, demo_cfg),
+            _backend("smart-mock", smart, 0.95, 0.03, 1500.0, demo_cfg),
+        ],
+        policy=RoutingPolicy.default(),
+        retry_policy=RetryPolicy(max_attempts=3, base_delay_s=0.05),
+    )
+    app.state.routed_model = model
+    _logger.warning("demo_mode.enabled", detail="/debug fault-injection routes are live")
+    return model
+
+
+def _build_model(config: AthenaConfig) -> RoutedModel:
+    """Build the RoutedModel every request goes through.
+
+    Backends registered, each with its own circuit breaker + outbound rate
+    limiter:
+      - "cloud": CloudModel, when ANTHROPIC_API_KEY is set.
+      - "local": LocalModel (Ollama), when ATHENA_LOCAL_MODEL_NAME is set.
+      - "mock":  MockModel, only when neither of the above exists, so the
+        zero-config demo still boots.
+    A cloud/local construction failure is logged and skipped rather than
+    crashing startup. model_name for the cloud backend still comes from the
+    raw ANTHROPIC_MODEL env var, not AthenaConfig: config.model_registry
+    models routing *roles*, not "the concrete Anthropic model id".
     """
+    backends: list[Backend] = []
+
     api_key = config.anthropic_api_key.strip()
     if api_key:
         try:
             from athenai.models.cloud import CloudModel
 
             model_name = os.environ.get("ANTHROPIC_MODEL", "claude-3-5-haiku-20241022")
-            _logger.info("model.init", backend="anthropic", model=model_name)
-            return CloudModel(api_key=api_key, model_name=model_name)
+            backends.append(_backend(
+                "cloud", CloudModel(api_key=api_key, model_name=model_name),
+                config.cloud_quality, config.cloud_cost_per_1k, config.cloud_latency_ms, config,
+            ))
+            _logger.info("model.init", backend="cloud", model=model_name)
         except Exception as exc:
-            _logger.warning("model.fallback_to_mock", reason=str(exc))
-    else:
-        _logger.info("model.init", backend="mock", reason="anthropic_api_key not set")
-    return MockModel()
+            _logger.warning("model.cloud_failed", reason=str(exc))
+
+    local_name = config.local_model_name.strip()
+    if local_name:
+        try:
+            from athenai.models.local import LocalModel
+
+            backends.append(_backend(
+                "local", LocalModel(model_name=local_name, base_url=config.local_model_url),
+                config.local_quality, config.local_cost_per_1k, config.local_latency_ms, config,
+            ))
+            _logger.info("model.init", backend="local", model=local_name)
+        except Exception as exc:
+            _logger.warning("model.local_failed", reason=str(exc))
+
+    if not backends:
+        _logger.info("model.init", backend="mock", reason="no cloud or local model configured")
+        backends.append(_backend("mock", MockModel(), 0.5, 0.0, 10.0, config))
+
+    return RoutedModel(
+        backends,
+        policy=RoutingPolicy.default(),
+        retry_policy=RetryPolicy(
+            max_attempts=config.retry_max_attempts, base_delay_s=config.retry_base_delay_s
+        ),
+    )
 
 
 def _build_tool_registry() -> ToolRegistry:
@@ -160,7 +239,9 @@ async def _maybe_add_conversation_memory(config: AthenaConfig) -> object | None:
 _EMBEDDER_MODEL_NAME = "text-embedding-3-small"
 
 
-async def _build_embedding_cache(config: AthenaConfig, registry: dict[str, object]) -> object:
+async def _build_embedding_cache(
+    config: AthenaConfig, registry: dict[str, object]
+) -> CacheBackend:
     """Redis-backed cache if reachable, else an in-process fallback.
 
     Mirrors every other optional-infra degrade in this module: a down or
@@ -286,7 +367,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         _logger.info("auth.enabled")
 
     async with core_lifespan(config) as registry:
-        model = _build_model(config)
+        model = _build_demo_model(config, app) if config.demo_mode else _build_model(config)
+        registry["routed_model"] = model
+        app.state.rate_limiter = ClientRateLimiter(
+            config.rate_limit_capacity, config.rate_limit_refill_per_s
+        )
         tool_registry = _build_tool_registry()
         memory = await _maybe_add_conversation_memory(config)
         if memory is not None:
@@ -366,6 +451,7 @@ def create_app(cors_allowed_origins: list[str] | None = None) -> FastAPI:
     )
 
     app.include_router(router)
+    app.include_router(debug_router)
     return app
 
 

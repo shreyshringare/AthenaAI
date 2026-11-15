@@ -104,3 +104,25 @@ def test_quality_policy_can_pick_different_model() -> None:
     assert quality_decision.selected_role == "reasoning"
     # Cost-optimized LOW complexity must pick fast
     assert cost_decision.selected_role == "fast"
+
+
+def test_tier_tilts_weights_toward_quality_for_high() -> None:
+    base = RoutingPolicy.default()
+    high = base.for_complexity("HIGH")
+    low = base.for_complexity("LOW")
+    assert high.quality_weight > base.quality_weight > low.quality_weight
+    assert low.cost_weight > base.cost_weight > high.cost_weight
+    assert abs(high.quality_weight + high.cost_weight + high.latency_weight - 1.0) < 1e-9
+
+
+def test_exclude_skips_roles_for_fallback() -> None:
+    router = _router()
+    first = router.select(_ctx(100)).selected_role
+    second = router.select(_ctx(100), exclude=frozenset({first})).selected_role
+    assert second != first
+
+
+def test_exclude_everything_raises() -> None:
+    router = _router()
+    with pytest.raises(ModelUnavailableError):
+        router.select(_ctx(100), exclude=frozenset({"fast", "default", "reasoning"}))

@@ -163,6 +163,13 @@ class CircuitBreaker:
             await self.record_failure()
             raise
 
+    def reset(self) -> None:
+        """Force the breaker back to CLOSED with clean counters (ops/demo hook)."""
+        self._state = CircuitState.CLOSED
+        self._failure_count = 0
+        self._opened_at = None
+        self._probe_successes = 0
+
     @property
     def closed_to_open_transitions(self) -> int:
         return self._transition_count

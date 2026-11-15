@@ -46,7 +46,7 @@ model_latency_seconds = Histogram(
 tokens_total = Counter(
     "athena_tokens_total",
     "Total LLM tokens consumed",
-    ["model", "type"],  # type: input | output
+    ["model", "type"],  # values: input | output
 )
 
 tool_calls_total = Counter(
@@ -68,4 +68,21 @@ rag_chunks_retrieved = Counter(
 cache_hits_total = Counter(
     "athena_cache_hits_total",
     "Semantic cache hits (requests served without model call)",
+)
+
+routed_requests_total = Counter(
+    "athena_routed_requests_total",
+    "Model calls by the backend role the router selected",
+    ["role", "complexity"],
+)
+
+model_fallbacks_total = Counter(
+    "athena_model_fallbacks_total",
+    "Times a routed call failed on one backend and fell over to the next",
+    ["role", "reason"],
+)
+
+rate_limited_total = Counter(
+    "athena_rate_limited_total",
+    "Gateway requests rejected by the per-client rate limiter",
 )

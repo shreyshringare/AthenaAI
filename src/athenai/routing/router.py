@@ -5,9 +5,10 @@ HOW IT FITS IN THE SYSTEM:
 Entry point for the routing subsystem. Given a RoutingContext (request size,
 task description) and an optional RoutingPolicy, select() first buckets the
 request into a complexity tier (LOW/MEDIUM/HIGH) from estimated token count,
-then either takes the role that matches that tier directly, or — for MEDIUM
-complexity — asks athenai.routing.scorer.ModelScorer to rank all available
-models under the policy's weights. Availability also factors in
+then asks athenai.routing.scorer.ModelScorer to rank all available models
+under the policy's quality/cost/latency weights, tilted by that tier
+(RoutingPolicy.for_complexity: short prompts favour cheap+fast, long ones
+favour quality). Availability also factors in
 athenai.resilience.circuit_breaker.CircuitBreaker state per model role, so a
 model that's currently failing is skipped in favour of the next-best one.
 """
@@ -38,12 +39,6 @@ class RoutingDecision:
 _COMPLEXITY_THRESHOLDS = {
     "LOW": 500,
     "MEDIUM": 2000,
-}
-
-_ROLE_FOR_COMPLEXITY = {
-    "LOW": "fast",
-    "MEDIUM": "default",
-    "HIGH": "reasoning",
 }
 
 
@@ -87,41 +82,35 @@ class ModelRouter:
         self,
         context: RoutingContext,
         policy: RoutingPolicy | None = None,
+        exclude: frozenset[str] = frozenset(),
     ) -> RoutingDecision:
         """Pick a model role for `context` under `policy` (default policy if None).
 
         Raises ModelUnavailableError if every model in the catalog is either
         marked unavailable or behind an open circuit — callers should treat
         this as "no model can currently serve this request," not retry the
-        same call blindly.
+        same call blindly. `exclude` lists roles to skip (e.g. ones that just
+        failed this request) so callers can fall back to the next-best model.
         """
         policy = policy or RoutingPolicy.default()
         complexity = _classify_complexity(context.estimated_input_tokens)
-        preferred_role = _ROLE_FOR_COMPLEXITY[complexity]
-
         available = [
             m for m in self._catalog
-            if m.is_available and not self._is_circuit_open(m.role)
+            if m.is_available and m.role not in exclude and not self._is_circuit_open(m.role)
         ]
-
         if not available:
             raise ModelUnavailableError(
-                "All models are unavailable (circuit open or marked unhealthy)"
+                "All models are unavailable (circuit open, excluded, or marked unhealthy)"
             )
 
-        # For LOW/HIGH complexity, force the matched role if available.
-        # For MEDIUM, use weighted scoring across all available models.
-        preferred = next((m for m in available if m.role == preferred_role), None)
-        if preferred and complexity != "MEDIUM":
-            best = preferred
-        else:
-            ranked = self._scorer.rank(available, policy)
-            best = ranked[0]
+        tier_policy = policy.for_complexity(complexity)
+        best = self._scorer.rank(available, tier_policy)[0]
+
         estimated_cost = (context.estimated_input_tokens / 1000.0) * best.cost_per_1k_tokens
 
         return RoutingDecision(
             selected_role=best.role,
-            reason=f"complexity={complexity}, policy=default, circuit=CLOSED",
+            reason=f"complexity={complexity}, weighted score, circuit=CLOSED",
             estimated_cost_usd=max(0.0001, estimated_cost),
             complexity=complexity,
         )

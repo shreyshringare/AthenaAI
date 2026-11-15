@@ -104,6 +104,30 @@ class AthenaConfig(BaseSettings):
     retry_base_delay_s: float = Field(default=0.5)
     request_timeout_s: float = Field(default=30.0)
 
+    # Routing / model backends. Cloud is used when anthropic_api_key is set;
+    # local (Ollama) when local_model_name is set. Neither set -> MockModel.
+    # Scores are 0-1 quality, USD per 1k tokens, and average latency in ms;
+    # they feed athenai.routing.scorer.ModelScorer.
+    local_model_name: str = Field(default="")
+    local_model_url: str = Field(default="http://localhost:11434")
+    cloud_quality: float = Field(default=0.9)
+    cloud_cost_per_1k: float = Field(default=0.003)
+    cloud_latency_ms: float = Field(default=900.0)
+    local_quality: float = Field(default=0.6)
+    local_cost_per_1k: float = Field(default=0.0)
+    local_latency_ms: float = Field(default=1500.0)
+    model_rate_limit_capacity: int = Field(default=30)
+    model_rate_limit_per_s: float = Field(default=10.0)
+
+    # Inbound per-client rate limit on /v1/* routes (token bucket per API
+    # key or client IP). capacity=0 disables it.
+    rate_limit_capacity: int = Field(default=60)
+    rate_limit_refill_per_s: float = Field(default=2.0)
+
+    # Demo mode: two controllable mock backends + /debug fault-injection
+    # routes (see athenai.models.demo, athenai.gateway.debug). Local use only.
+    demo_mode: bool = Field(default=False)
+
     # Cache
     response_cache_ttl_s: int = Field(default=300)
 

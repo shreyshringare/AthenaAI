@@ -22,7 +22,8 @@ lives here — routing failures into HTTPException and bumping metrics counters
 is the extent of it.
 
 AUTH: every route below except health/ready/metrics carries
-`dependencies=[Depends(require_api_key)]` — see athenai.gateway.auth for
+`dependencies=_GUARDS` (API-key auth then per-client rate limit, see
+athenai.gateway.auth and athenai.gateway.ratelimit) — see athenai.gateway.auth for
 why that's a per-route dependency and not a blanket middleware (probes and
 scrapers need to stay open).
 """
@@ -30,12 +31,14 @@ scrapers need to stay open).
 from __future__ import annotations
 
 import uuid
+from collections.abc import AsyncIterator
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from athenai.core.types import AIRequest, Message, MessageRole
 from athenai.gateway.auth import require_api_key
+from athenai.gateway.ratelimit import rate_limit
 from athenai.gateway.schemas import (
     AgentRunRequest,
     AgentRunResponse,
@@ -81,7 +84,10 @@ async def metrics() -> StreamingResponse:
     return StreamingResponse(iter([data]), media_type=CONTENT_TYPE_LATEST)
 
 
-@router.post("/v1/chat", response_model=ChatResponse, dependencies=[Depends(require_api_key)])
+_GUARDS = [Depends(require_api_key), Depends(rate_limit)]
+
+
+@router.post("/v1/chat", response_model=ChatResponse, dependencies=_GUARDS)
 async def chat(body: ChatRequest, request: Request) -> ChatResponse:
     """Single-turn, non-streaming chat. Mints a fresh request_id/trace_id per
     call (the client cannot supply its own) so every request is independently
@@ -120,7 +126,7 @@ async def chat(body: ChatRequest, request: Request) -> ChatResponse:
     )
 
 
-@router.post("/v1/chat/stream", dependencies=[Depends(require_api_key)])
+@router.post("/v1/chat/stream", dependencies=_GUARDS)
 async def chat_stream(body: ChatRequest, request: Request) -> StreamingResponse:
     """Streams the chat response as Server-Sent Events.
 
@@ -145,7 +151,7 @@ async def chat_stream(body: ChatRequest, request: Request) -> StreamingResponse:
         stream=True,
     )
 
-    async def event_stream():
+    async def event_stream() -> AsyncIterator[str]:
         try:
             async for token in request.app.state.runtime.stream(req):
                 yield f"data: {token}\n\n"
@@ -160,7 +166,7 @@ async def chat_stream(body: ChatRequest, request: Request) -> StreamingResponse:
 
 
 @router.post(
-    "/v1/agents/run", response_model=AgentRunResponse, dependencies=[Depends(require_api_key)]
+    "/v1/agents/run", response_model=AgentRunResponse, dependencies=_GUARDS
 )
 async def agent_run(body: AgentRunRequest, request: Request) -> AgentRunResponse:
     """Run the shared `app.state.agent` to completion on `body.task`.
@@ -200,7 +206,7 @@ async def agent_run(body: AgentRunRequest, request: Request) -> AgentRunResponse
 @router.post(
     "/v1/documents/ingest",
     response_model=DocumentIngestResponse,
-    dependencies=[Depends(require_api_key)],
+    dependencies=_GUARDS,
 )
 async def document_ingest(
     body: DocumentIngestRequest, request: Request
@@ -233,7 +239,7 @@ async def document_ingest(
 @router.post(
     "/v1/documents/search",
     response_model=DocumentSearchResponse,
-    dependencies=[Depends(require_api_key)],
+    dependencies=_GUARDS,
 )
 async def document_search(
     body: DocumentSearchRequest, request: Request
